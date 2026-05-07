@@ -26,7 +26,7 @@ Solo se activan los agentes necesarios para cada petición.
 ### 1. Clonar el repositorio
 
 ```bash
-git clone <url-del-repositorio>
+git clone https://github.com/MartinPerfumo/Ejemplo1.git
 cd ejemplo1
 ```
 
