@@ -66,14 +66,22 @@ Edita `.env` y sustituye `tu_api_key_aqui` por tu clave real de [console.groq.co
 ## Uso
 
 ```bash
-# Tarea de agenda
-crewai run "Organiza una reunión con el equipo de marketing para el viernes"
+crewai run
+```
+Cuando pregunte "¿Qué necesitas?", puedes escribir lo que desees. Algunos ejemplos son
 
-# Tarea de comunicación
-crewai run "Redacta un email al cliente de Telefonica informando del retraso en la entrega"
-
-# Tarea mixta (activa ambos agentes)
-crewai run "Convoca una reunión con el equipo de DevOps y crea el email de invitación"
+```bash
+"Organiza una reunión con el equipo de marketing para el viernes"
+```
+```bash
+"Redacta un email al cliente de Telefonica informando del retraso en la entrega"
+```
+```bash
+"Convoca una reunión con el equipo de DevOps el lunes a las 10 y crea el email de invitación"
+```
+También puedes ejecutar la petición directamente con: (Susituye tu petición por el campo PETICION)
+```bash
+uv run Ejemplo1 PETICIÓN
 ```
 
 ## Estructura del proyecto
