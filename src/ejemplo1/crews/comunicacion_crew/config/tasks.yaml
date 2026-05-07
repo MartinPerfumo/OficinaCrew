@@ -1,0 +1,17 @@
+tarea_comunicacion:
+  description: >
+    Redacta la siguiente comunicación:
+    {peticion}
+    
+    Si el usuario especifica motivo, participantes o detalles, inclúyelos tal cual en la comunicación.
+    Si NO se especifica motivo, participantes ni detalles, no tienes que inventar nada.
+    No rellenes información que el usuario no haya dado explícitamente, pero no dejes el mensaje muy escueto.
+    
+    Debes crear una comunicación profesional con:
+    - Asunto (si aplica)
+    - Destinatario(s) sugerido(s)
+    - Mensaje completo con saludo, cuerpo y despedida
+    - Tono apropiado al contexto
+  expected_output: >
+    Email o mensaje completo en formato markdown, listo para enviar.
+  agent: agente_comunicacion

@@ -1,0 +1,11 @@
+tarea_agenda:
+  description: >
+    Organiza la siguiente petición relacionada con agenda/reunión/cita:
+    {peticion}
+    
+    Si el usuario especifica motivo, participantes o detalles, inclúyelos tal cual en la agenda.
+    Si NO se especifica motivo, participantes ni detalles, SOLO indica la hora y el día de la reunión, sin inventar nada más.
+    No rellenes información que el usuario no haya dado explícitamente.
+  expected_output: >
+    Propuesta de agenda en formato markdown con los detalles justos y necesarios
+  agent: agente_agenda
