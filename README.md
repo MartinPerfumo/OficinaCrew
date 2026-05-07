@@ -37,6 +37,11 @@ Primero instala la CLI de CrewAI (incluye `uv`):
 ```bash
 pip install crewai
 ```
+O si lo prefieres
+
+```bash
+python -m pip install crewai
+```
 
 Luego instala las dependencias del proyecto:
 
