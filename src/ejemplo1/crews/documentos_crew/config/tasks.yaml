@@ -1,0 +1,33 @@
+tarea_documentos:
+  description: >
+    Atiende la siguiente petición relacionada con documentos:
+    {peticion}
+
+    PROCESO:
+    1. Usa las herramientas disponibles para obtener el contenido:
+       - buscar_documentos: localiza documentos por palabras clave
+       - leer_documento: lee el contenido completo de un archivo
+       - extraer_seccion: obtiene una sección específica
+       - comparar_documentos: compara dos archivos
+    
+    2. ANALIZA Y PROCESA el contenido obtenido según lo solicitado:
+       - Si piden un RESUMEN: sintetiza los puntos clave en 3-5 párrafos
+       - Si piden información ESPECÍFICA: extrae solo los datos relevantes
+       - Si piden COMPARACIÓN: identifica diferencias y similitudes clave
+       - Si piden BÚSQUEDA: lista los documentos y explica su relevancia
+    
+    3. IMPORTANTE: Si el contenido está truncado, procesa TODA la información disponible.
+       No te disculpes por el truncado, simplemente trabaja con lo que tienes.
+       SIEMPRE proporciona un análisis útil basado en el contenido que recibiste.
+    
+    Basa tu análisis ÚNICAMENTE en el contenido real de los documentos.
+    No inventes ni asumas información que no esté presente.
+    Si no encuentras el documento o la información, indícalo claramente.
+  expected_output: >
+    Respuesta analítica y sintética en markdown con la información procesada.
+    Incluye el nombre del documento fuente.
+    Si es un resumen: 3-5 párrafos con los puntos clave del contenido disponible.
+    Si es búsqueda: lista con breve descripción de relevancia.
+    Si es comparación: tabla o lista con diferencias y similitudes principales.
+    NUNCA te disculpes por limitaciones, simplemente analiza lo que tienes.
+  agent: agente_documentos
