@@ -22,6 +22,24 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd") # Igno
 
 llm = LLM(model="groq/llama-3.3-70b-versatile")
 
+
+def _extract_semantic_text_for_rules(peticion: str) -> str:
+    """Aísla el contenido útil para reglas, evitando texto de instrucciones del prompt."""
+    text = (peticion or "").strip()
+
+    # Cuando viene del monitor de Gmail, el prompt incluye secciones de instrucciones
+    # que contienen palabras como "reunión", "cita" o "mañana" y contaminan la
+    # clasificación determinista. Nos quedamos solo con el bloque del email real.
+    email_marker = "Email recibido:"
+    separator = "\n---"
+    if email_marker in text and separator in text:
+        start = text.find(email_marker) + len(email_marker)
+        end = text.find(separator, start)
+        if end > start:
+            return text[start:end].strip()
+
+    return text
+
 class SupervisorFlow(Flow):
     
     """
@@ -81,7 +99,7 @@ Responde SOLO con el JSON, sin texto adicional."""
             result = {"categoria": "comunicacion", "resumen": peticion, "texto_agenda": "", "texto_comunicacion": "", "texto_documentos": ""} # type: ignore
 
         # Fallback determinista con prioridad a intención explícita.
-        text_for_rules = peticion.lower()
+        text_for_rules = _extract_semantic_text_for_rules(peticion).lower()
         has_scheduling_intent = bool(
             re.search(
                 r"\b(fijar|fija|fijamos|programar|programa|programamos|reprogramar|reprograma|agendar|agenda|agendamos|convocar|convoca|convocamos|organizar|organiza|organizamos|coordinar|coordina|coordinamos|reservar|reserva|reservamos|reconfirmar|reconfirma|reconfirmamos|crear\s+(cita|evento))\b|\b(organizar|organiza|organizamos|coordinar|coordina|coordinamos|reservar|reserva|reservamos)\s+(una\s+)?(reunion|reunión|cita)\b|\b(dejarla\s+reservada|dejar\s+reservada|quedar\s+reservada|quede\s+reservada|quedar\s+la\s+reservada)\b",
@@ -96,7 +114,10 @@ Responde SOLO con el JSON, sin texto adicional."""
             )
         )
         has_document_intent = bool(
-            re.search(r"\b(documento|documentos|informe|adjunto|adjuntar|presentar|expediente|contrato)\b", text_for_rules)
+            re.search(
+                r"\b(documento|documentos|informe|adjunto|adjuntar|presentar|expediente|contrato|buscar|busca|buscarlos|b[uú]scalos|localizar|encuentra)\b",
+                text_for_rules,
+            )
         )
         asks_to_write = bool(
             re.search(

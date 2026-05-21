@@ -37,3 +37,10 @@
   - proponer desde las 10:00 en adelante
   - ordenar opciones cronológicamente
 - Se implementó aceptación por número de opción ("elijo la opción 1") para convertirla en reserva real usando el bloque citado con alternativas.
+
+## 2026-05-21
+- Se creó interfaz web con FastAPI + uvicorn (`web_server.py`):
+  - Endpoint POST `/api/peticion` que ejecuta `SupervisorFlow` y devuelve categoría, resultado y duración.
+  - Frontend HTML integrado con diseño dark, campo de texto, chips de ejemplo y historial de respuestas.
+  - Badges de color por categoría (agenda, comunicación, documentos, ambos).
+  - Arranca con `uv run python web_server.py` en http://localhost:8000 (puerto configurable con `--port`).
