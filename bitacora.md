@@ -44,3 +44,22 @@
   - Frontend HTML integrado con diseño dark, campo de texto, chips de ejemplo y historial de respuestas.
   - Badges de color por categoría (agenda, comunicación, documentos, ambos).
   - Arranca con `uv run python web_server.py` en http://localhost:8000 (puerto configurable con `--port`).
+- Se integró el monitor de Gmail dentro del servidor web:
+  - Hilo daemon que ejecuta el polling de Gmail en background.
+  - Endpoints `/api/gmail/status`, `/api/gmail/start`, `/api/gmail/stop` para controlar el monitor desde la UI.
+  - Panel en la interfaz con indicador de estado (dot verde/rojo), contador de emails y botón Iniciar/Detener.
+  - Logs expandibles del monitor en tiempo real.
+  - Arranque automático por defecto; desactivable con `--no-gmail`.
+- Se añadió panel de notificaciones de actividad del monitor:
+  - Tarjetas para confirmaciones de reunión (verde), conflictos de agenda (amarillo), emails procesados (azul).
+  - Se reubicó como widget flotante fijo arriba a la derecha con scroll interno para no desplazar el formulario.
+- Se integró Google Calendar en las peticiones web (`/api/peticion`):
+  - Al solicitar una cita desde la UI, se comprueba disponibilidad en Calendar.
+  - Si hay hueco, se crea el evento automáticamente y se muestra confirmación con fecha/hora.
+  - Si hay conflicto, se muestran hasta 3 alternativas disponibles en la tarjeta de resultado.
+  - Se genera un borrador de email listo para copiar (convocatoria o propuesta de alternativas).
+  - Las confirmaciones y conflictos se publican como notificaciones en el panel de actividad.
+- Se corrigió error de encoding UTF-8 en el HTML por surrogate pairs en emojis JavaScript.
+- Se corrigió clasificación errónea de emails de documentos como agenda:
+  - El fallback determinista ahora aísla el contenido semántico real del email, ignorando las instrucciones del prompt que contaminaban las regex con palabras como "reunión" o "mañana".
+  - Se amplió la detección de intención documental con verbos de búsqueda (buscar, búscalos, localizar, encuentra).
