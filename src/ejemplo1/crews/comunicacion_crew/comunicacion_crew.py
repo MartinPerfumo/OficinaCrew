@@ -1,8 +1,10 @@
+import os
+
 from crewai import Agent, Crew, Process, Task, LLM
 from crewai.agents.agent_builder.base_agent import BaseAgent
 from crewai.project import CrewBase, agent, crew, task
 
-llm = LLM(model="groq/llama-3.3-70b-versatile")
+llm = LLM(model=os.getenv("CREW_MODEL", "groq/llama-3.1-8b-instant"))
 
 @CrewBase
 class ComunicacionCrew:

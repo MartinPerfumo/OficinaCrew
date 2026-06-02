@@ -1,3 +1,5 @@
+import os
+
 from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
 
@@ -8,8 +10,8 @@ from ejemplo1.crews.documentos_crew.documentos_tools import (
     comparar_documentos,
 )
 
-# Usar el mismo modelo que el supervisor para consistencia
-llm = LLM(model="groq/llama-3.3-70b-versatile")
+# Modelo configurable para reducir fallos por rate limit en producción.
+llm = LLM(model=os.getenv("CREW_MODEL", "groq/llama-3.1-8b-instant"))
 
 
 @CrewBase

@@ -23,6 +23,7 @@ import argparse
 import contextlib
 import io
 import json
+import os
 import statistics
 import sys
 import time
@@ -52,8 +53,24 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from benchmark_cases import CASOS_CLASIFICACION
 from crewai import LLM
 
-# LLM del supervisor (igual que en main.py)
-_llm = LLM(model="groq/llama-3.3-70b-versatile")
+PRIMARY_MODEL = os.getenv("MODEL", "groq/llama-3.3-70b-versatile")
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "groq/llama-3.1-8b-instant")
+
+_llm = LLM(model=PRIMARY_MODEL)
+_fallback_llm = LLM(model=FALLBACK_MODEL)
+
+
+def _safe_llm_call(prompt: str) -> str:
+    try:
+        response = _llm.call(prompt)
+        return response if isinstance(response, str) else str(response)
+    except Exception as e:
+        msg = str(e).lower()
+        if "rate_limit_exceeded" not in msg and "ratelimit" not in msg and "429" not in msg:
+            raise
+        time.sleep(1.5)
+        response = _fallback_llm.call(prompt)
+        return response if isinstance(response, str) else str(response)
 
 # ─── Prompt de clasificación (copia fiel de main.py) ──────────────────────────
 PROMPT_TEMPLATE = """Eres un clasificador de tareas de oficina. 
@@ -79,7 +96,7 @@ def clasificar(peticion: str) -> tuple[dict, float]:
     """Llama al LLM clasificador y devuelve (resultado_dict, latencia_ms)."""
     prompt = PROMPT_TEMPLATE.format(peticion=peticion)
     t0 = time.perf_counter()
-    response = _llm.call(prompt)
+    response = _safe_llm_call(prompt)
     latencia_ms = (time.perf_counter() - t0) * 1000
 
     text = response if isinstance(response, str) else str(response)

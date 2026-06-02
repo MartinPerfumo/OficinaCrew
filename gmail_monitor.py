@@ -86,7 +86,7 @@ def analyze_email_urgency_and_actions(email: dict) -> dict:
     """Analiza urgencia y acciones pendientes (RF1/RF3) con fallback robusto."""
     try:
         sys.path.insert(0, str(Path(__file__).parent / "src"))
-        from src.ejemplo1.main import llm
+        from src.ejemplo1.main import _call_llm_with_fallback
 
         prompt = f"""Analiza este email y responde SOLO con JSON válido.
 
@@ -115,8 +115,7 @@ Reglas:
 - Si no hay acciones, devuelve una lista vacía.
 - La urgencia debe ser solo una de: urgente, no urgente, trivial.
 """
-        response = llm.call(prompt)
-        text = response if isinstance(response, str) else str(response)
+        text = _call_llm_with_fallback(prompt)
         start_idx = text.find("{")
         end_idx = text.rfind("}") + 1
         if start_idx != -1 and end_idx > start_idx:

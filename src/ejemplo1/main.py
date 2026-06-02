@@ -4,6 +4,7 @@ import os
 import sys
 import json
 import re
+import time
 import warnings
 
 from pathlib import Path
@@ -20,7 +21,30 @@ from crewai.flow import Flow, listen, start, router
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd") # Ignorar advertencias de sintaxis de pysbd
 
-llm = LLM(model="groq/llama-3.3-70b-versatile")
+PRIMARY_MODEL = os.getenv("MODEL", "groq/llama-3.3-70b-versatile")
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "groq/llama-3.1-8b-instant")
+
+llm = LLM(model=PRIMARY_MODEL)
+fallback_llm = LLM(model=FALLBACK_MODEL)
+
+
+def _is_rate_limit_error(err: Exception) -> bool:
+    msg = str(err).lower()
+    return "rate_limit_exceeded" in msg or "ratelimit" in msg or "429" in msg
+
+
+def _call_llm_with_fallback(prompt: str) -> str:
+    """Llama al LLM primario y, ante rate limit, degrada al modelo fallback."""
+    try:
+        response = llm.call(prompt)
+        return response if isinstance(response, str) else str(response)
+    except Exception as e:
+        if not _is_rate_limit_error(e):
+            raise
+        # Pequeña espera para límites TPM antes de degradar modelo.
+        time.sleep(1.5)
+        response = fallback_llm.call(prompt)
+        return response if isinstance(response, str) else str(response)
 
 DOCS_DIR = Path(__file__).resolve().parents[2] / "documentos"
 
@@ -125,23 +149,136 @@ def _contains_nonexistent_doc_references(text: str) -> bool:
     return any(ref.lower() not in available for ref in refs)
 
 
+def _asks_for_summary(text: str) -> bool:
+    """Detecta intención explícita de resumen en la petición."""
+    return bool(re.search(r"\b(resume|resumen|resumir|sintetiza|sintesis|síntesis)\b", text or "", re.IGNORECASE))
+
+
+def _should_force_summary_fallback(peticion: str, answer: str) -> bool:
+    """Activa fallback si se pidió resumen pero la salida no está realmente sintetizada."""
+    if not _asks_for_summary(peticion):
+        return False
+
+    candidate = _find_best_document_candidate(peticion)
+    if not candidate:
+        return False
+
+    source = _read_document_content(candidate)
+    if not source.strip():
+        return False
+
+    source = source[:14000]
+    return not _is_summary_like(answer, source)
+
+
+def _find_documents_for_request(peticion: str, max_docs: int = 2) -> list[Path]:
+    """Selecciona los documentos más relevantes para una petición de resumen."""
+    if not DOCS_DIR.exists():
+        return []
+
+    files = [
+        p for p in DOCS_DIR.glob("**/*")
+        if p.is_file() and p.suffix.lower() in {".md", ".txt", ".pdf"}
+    ]
+    if not files:
+        return []
+
+    text = (peticion or "").lower()
+    tokens = [t for t in re.findall(r"[a-z0-9]+", text) if len(t) > 2]
+    stop = {"necesito", "urgentemente", "resumen", "empresa", "empresas", "documento", "correo"}
+    tokens = [t for t in tokens if t not in stop]
+
+    scored = []
+    for p in files:
+        name = p.name.lower()
+        stem = p.stem.lower()
+        score = 0
+        for tk in tokens:
+            if tk in stem:
+                score += 8
+            elif tk in name:
+                score += 4
+        if "brxs" in stem and "brxs" in text:
+            score += 20
+        if "erasmus" in stem and "erasmus" in text:
+            score += 20
+        if score > 0:
+            scored.append((score, p))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    selected = []
+    seen = set()
+    for _, path in scored:
+        key = path.name.lower()
+        if key in seen:
+            continue
+        selected.append(path)
+        seen.add(key)
+        if len(selected) >= max_docs:
+            break
+    return selected
+
+
+def _fallback_multi_document_summary(peticion: str) -> str | None:
+    """Genera resumen multi-documento cuando la petición pide varias empresas."""
+    if not _asks_for_summary(peticion):
+        return None
+
+    text = (peticion or "").lower()
+    asks_multiple = (" y " in text) or ("," in text) or ("ambas" in text) or ("dos empresas" in text)
+    if not asks_multiple:
+        return None
+
+    docs = _find_documents_for_request(peticion, max_docs=2)
+    if len(docs) < 2:
+        return None
+
+    blocks = []
+    for doc in docs:
+        content = _read_document_content(doc)
+        if not content.strip():
+            continue
+        content = content[:14000]
+        summary = _deterministic_summary(content, doc.name)
+        lines = [ln for ln in summary.splitlines() if ln.strip()]
+        short_summary = "\n".join(lines[:8]).strip()
+        blocks.append(f"## {doc.name}\n{short_summary}")
+
+    if len(blocks) < 2:
+        return None
+    return "\n\n".join(blocks)
+
+
 def _is_summary_like(answer: str, source_content: str) -> bool:
     """Valida que una respuesta parezca resumen y no copia extensa del documento."""
     cleaned_answer = (answer or "").strip()
     cleaned_source = (source_content or "").strip()
     if not cleaned_answer:
         return False
+    # Un resumen útil no debería ser excesivamente corto en peticiones de resumen.
+    if len(cleaned_answer) < 180:
+        return False
     if len(cleaned_answer) > 2200:
         return False
     if len(cleaned_source) > 0 and (len(cleaned_answer) / max(len(cleaned_source), 1)) > 0.55:
         return False
 
+    # Evita casos en los que el modelo devuelve las primeras líneas del documento.
+    answer_head = cleaned_answer[:200]
+    if len(answer_head) >= 80 and answer_head in cleaned_source[:1200]:
+        return False
+
     lines = [ln.strip() for ln in cleaned_answer.splitlines() if ln.strip()]
     copied_long_lines = 0
+    copied_medium_lines = 0
     for ln in lines:
         if len(ln) >= 120 and ln in cleaned_source:
             copied_long_lines += 1
+        if len(ln) >= 60 and ln in cleaned_source:
+            copied_medium_lines += 1
     if copied_long_lines >= 3:
+        return False
+    if copied_medium_lines >= 3:
         return False
     return True
 
@@ -194,6 +331,10 @@ def _deterministic_summary(content: str, source_name: str) -> str:
 
 def _fallback_document_response(peticion: str) -> str:
     """Genera respuesta de documentos sin tool-calling cuando el proveedor falla."""
+    multi = _fallback_multi_document_summary(peticion)
+    if multi:
+        return multi
+
     candidate = _find_best_document_candidate(peticion)
     if not candidate:
         return "No encontré un documento que coincida con la petición en la carpeta documentos/."
@@ -212,8 +353,7 @@ def _fallback_document_response(peticion: str) -> str:
             f"Archivo: {candidate.name}\n\n"
             f"Contenido:\n{content}"
         )
-        response = llm.call(prompt)
-        text = response if isinstance(response, str) else str(response)
+        text = _call_llm_with_fallback(prompt)
         text = text.strip()
         if _is_summary_like(text, content):
             if "fuente:" not in text.lower():
@@ -228,8 +368,7 @@ def _fallback_document_response(peticion: str) -> str:
         f"Archivo: {candidate.name}\n\n"
         f"Contenido:\n{content}"
     )
-    response = llm.call(prompt)
-    text = response if isinstance(response, str) else str(response)
+    text = _call_llm_with_fallback(prompt)
     return text.strip()
 
 
@@ -292,7 +431,7 @@ Reglas IMPORTANTES anti-ambiguedad:
 
 Responde SOLO con el JSON, sin texto adicional."""
         
-        response = llm.call(prompt) # Llamada al LLM para clasificar la petición
+        response = _call_llm_with_fallback(prompt) # Llamada al LLM para clasificar la petición
 
 
         # Parsear JSON de la respuesta
@@ -459,6 +598,13 @@ Responde SOLO con el JSON, sin texto adicional."""
         from ejemplo1.crews.documentos_crew.documentos_crew import DocumentosCrew
         texto_documentos = self.state["clasificacion"]["texto_documentos"]
 
+        # Para resúmenes multiempresa, usamos fallback directo para evitar
+        # alucinaciones de nombres de archivo en tool-calling.
+        multi = _fallback_multi_document_summary(texto_documentos)
+        if multi:
+            self.state["resultado_documentos"] = multi
+            return multi
+
         try:
             result = DocumentosCrew().crew().kickoff(
                 inputs={"peticion": texto_documentos}
@@ -468,6 +614,13 @@ Responde SOLO con el JSON, sin texto adicional."""
             # Si el agente alucina nombres de archivo no existentes, forzamos fallback
             # para anclar la respuesta a documentos reales del repositorio.
             if _contains_nonexistent_doc_references(raw_result):
+                fallback_result = _fallback_document_response(texto_documentos)
+                self.state["resultado_documentos"] = fallback_result
+                return fallback_result
+
+            # Si el usuario pidió resumen pero el resultado parece copia extensa,
+            # aplicamos fallback para garantizar una síntesis real.
+            if _should_force_summary_fallback(texto_documentos, raw_result):
                 fallback_result = _fallback_document_response(texto_documentos)
                 self.state["resultado_documentos"] = fallback_result
                 return fallback_result

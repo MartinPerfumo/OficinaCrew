@@ -41,6 +41,7 @@ def buscar_documentos(palabras_clave: str) -> str:
     if not DOCS_DIR.exists():
         return f"El directorio de documentos no existe: {DOCS_DIR}"
     keywords = [k.strip().lower() for k in palabras_clave.replace(",", " ").split() if k.strip()]
+    query_full = palabras_clave.lower().strip()
     results = []
     for filepath in DOCS_DIR.glob("**/*"):
         if not filepath.is_file() or filepath.suffix.lower() not in SUPPORTED_EXTENSIONS:
@@ -49,9 +50,12 @@ def buscar_documentos(palabras_clave: str) -> str:
             content = _read_content(filepath).lower()
             hits = sum(content.count(kw) for kw in keywords)
             if hits > 0:
-                # Normalizar por longitud para que documentos grandes no dominen
                 normalized = hits / max(len(content) / 1000, 1)
-                results.append((filepath.name, hits, normalized))
+                # Boost si el nombre del archivo coincide con la búsqueda
+                name_lower = filepath.stem.lower()
+                name_match = 1000 if query_full in name_lower or name_lower in query_full else 0
+                name_match += sum(10 for kw in keywords if kw in name_lower)
+                results.append((filepath.name, hits, normalized + name_match))
         except Exception:
             continue
     if not results:
