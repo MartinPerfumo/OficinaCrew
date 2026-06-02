@@ -467,6 +467,9 @@ Responde SOLO con el JSON, sin texto adicional."""
                 r"\b(documento|documentos|informe|adjunto|adjuntar|presentar|expediente|contrato|buscar|busca|buscarlos|b[uú]scalos|localizar|encuentra)\b",
                 text_for_rules,
             )
+        ) or bool(
+            re.search(r"\b(resumen|resumir|sintetiza|síntesis|describe|describir|explica)\b", text_for_rules)
+            and re.search(r"\b(empresa|compa[nñ]i[aí]a|compania|negocio|firma|organización|organizacion)\b", text_for_rules)
         )
         asks_to_write = bool(
             re.search(
