@@ -9,7 +9,6 @@ from ejemplo1.crews.documentos_crew.documentos_tools import (
 )
 
 # Usar el mismo modelo que el supervisor para consistencia
-# El contenido está truncado a 4000 chars para evitar límites de TPM
 llm = LLM(model="groq/llama-3.3-70b-versatile")
 
 

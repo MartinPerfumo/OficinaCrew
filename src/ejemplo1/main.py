@@ -22,6 +22,216 @@ warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd") # Igno
 
 llm = LLM(model="groq/llama-3.3-70b-versatile")
 
+DOCS_DIR = Path(__file__).resolve().parents[2] / "documentos"
+
+
+def _read_document_content(filepath: Path) -> str:
+    """Lee texto de .md/.txt/.pdf para fallback de documentos."""
+    if filepath.suffix.lower() == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(str(filepath))
+            return "\n\n".join((page.extract_text() or "") for page in reader.pages)
+        except Exception as e:
+            return f"Error al leer PDF '{filepath.name}': {e}"
+    try:
+        return filepath.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Error al leer '{filepath.name}': {e}"
+
+
+def _extract_doc_hint(peticion: str) -> str:
+    """Extrae pista de nombre de documento desde la petición del usuario."""
+    text = (peticion or "").strip()
+    match = re.search(
+        r"(?:documento|archivo)\s+['\"]?([^'\"\n\r]+?)['\"]?(?:\?|$)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+    return text
+
+
+def _find_best_document_candidate(peticion: str) -> Path | None:
+    """Busca el documento más probable por solapamiento de tokens."""
+    if not DOCS_DIR.exists():
+        return None
+
+    files = [
+        p for p in DOCS_DIR.glob("**/*")
+        if p.is_file() and p.suffix.lower() in {".md", ".txt", ".pdf"}
+    ]
+    if not files:
+        return None
+
+    hint = _extract_doc_hint(peticion).lower()
+    tokens = [t for t in re.findall(r"[a-z0-9]+", hint) if len(t) > 1]
+    if not tokens:
+        return files[0]
+
+    def score(path: Path) -> tuple[int, int, int]:
+        name = path.name.lower()
+        stem = path.stem.lower()
+        token_hits = sum(1 for t in tokens if t in name)
+        exact_hint = int(hint in name or hint in stem)
+        stem_hits = sum(1 for t in tokens if t in stem)
+        return (exact_hint, token_hits, stem_hits)
+
+    ranked = sorted(files, key=score, reverse=True)
+    best = ranked[0]
+    if score(best) == (0, 0, 0):
+        return None
+    return best
+
+
+def _available_documents_map() -> dict[str, str]:
+    """Mapa de nombres de documento disponibles en disco (lower -> nombre real)."""
+    if not DOCS_DIR.exists():
+        return {}
+    files = [
+        p.name
+        for p in DOCS_DIR.glob("**/*")
+        if p.is_file() and p.suffix.lower() in {".md", ".txt", ".pdf"}
+    ]
+    return {name.lower(): name for name in files}
+
+
+def _extract_referenced_filenames(text: str) -> list[str]:
+    """Extrae posibles nombres de archivo mencionados en un texto."""
+    if not text:
+        return []
+    pattern = r"([A-Za-z0-9ÁÉÍÓÚÜÑáéíóúüñ _&\-]+\.(?:pdf|md|txt))"
+    matches = re.findall(pattern, text, flags=re.IGNORECASE)
+    refs = []
+    seen = set()
+    for m in matches:
+        cleaned = m.strip().strip("`\"'.,:;()[]{}")
+        key = cleaned.lower()
+        if cleaned and key not in seen:
+            refs.append(cleaned)
+            seen.add(key)
+    return refs
+
+
+def _contains_nonexistent_doc_references(text: str) -> bool:
+    """Devuelve True si la respuesta menciona archivos que no existen en documentos/."""
+    available = _available_documents_map()
+    if not available:
+        return False
+    refs = _extract_referenced_filenames(text)
+    if not refs:
+        return False
+    return any(ref.lower() not in available for ref in refs)
+
+
+def _is_summary_like(answer: str, source_content: str) -> bool:
+    """Valida que una respuesta parezca resumen y no copia extensa del documento."""
+    cleaned_answer = (answer or "").strip()
+    cleaned_source = (source_content or "").strip()
+    if not cleaned_answer:
+        return False
+    if len(cleaned_answer) > 2200:
+        return False
+    if len(cleaned_source) > 0 and (len(cleaned_answer) / max(len(cleaned_source), 1)) > 0.55:
+        return False
+
+    lines = [ln.strip() for ln in cleaned_answer.splitlines() if ln.strip()]
+    copied_long_lines = 0
+    for ln in lines:
+        if len(ln) >= 120 and ln in cleaned_source:
+            copied_long_lines += 1
+    if copied_long_lines >= 3:
+        return False
+    return True
+
+
+def _deterministic_summary(content: str, source_name: str) -> str:
+    """Genera un resumen extractivo breve cuando el LLM no sintetiza correctamente."""
+    lines = [ln.strip() for ln in (content or "").splitlines() if ln.strip()]
+    if not lines:
+        return f"No pude resumir {source_name} porque no contiene texto legible.\n\nFuente: {source_name}"
+
+    intro = []
+    for ln in lines:
+        if ln.startswith("#"):
+            continue
+        intro.append(ln)
+        if len(intro) == 3:
+            break
+
+    heading_candidates = []
+    for ln in lines:
+        if ln.startswith("#") and len(ln) <= 90:
+            heading_candidates.append(ln.lstrip("#").strip())
+        if len(heading_candidates) == 4:
+            break
+
+    key_points = []
+    for ln in lines:
+        low = ln.lower()
+        if ln.startswith(("-", "*", "1.", "2.", "3.", "4.")):
+            key_points.append(ln)
+        elif any(tok in low for tok in ["objetivo", "servicio", "mision", "visión", "fundación", "empleados", "facturación"]):
+            key_points.append(ln)
+        if len(key_points) == 5:
+            break
+
+    parts = []
+    if intro:
+        parts.append("Resumen ejecutivo:\n" + " ".join(intro))
+    if heading_candidates:
+        parts.append("Temas principales: " + ", ".join(heading_candidates))
+    if key_points:
+        bullet_block = "\n".join(f"- {p.lstrip('-* ').strip()}" for p in key_points)
+        parts.append("Puntos clave:\n" + bullet_block)
+
+    summary = "\n\n".join(parts).strip()
+    if len(summary) > 1800:
+        summary = summary[:1800].rstrip() + "..."
+    return f"{summary}\n\nFuente: {source_name}"
+
+
+def _fallback_document_response(peticion: str) -> str:
+    """Genera respuesta de documentos sin tool-calling cuando el proveedor falla."""
+    candidate = _find_best_document_candidate(peticion)
+    if not candidate:
+        return "No encontré un documento que coincida con la petición en la carpeta documentos/."
+
+    content = _read_document_content(candidate)
+    if not content.strip():
+        return f"No pude obtener contenido legible de {candidate.name}."
+
+    content = content[:14000]
+    asks_summary = bool(re.search(r"\b(resume|resumen|sintetiza|sintesis|síntesis)\b", peticion, re.IGNORECASE))
+
+    if asks_summary:
+        prompt = (
+            "Resume en español el contenido del documento en 3-5 párrafos claros. "
+            "No inventes datos. Incluye al final 'Fuente: <archivo>'.\n\n"
+            f"Archivo: {candidate.name}\n\n"
+            f"Contenido:\n{content}"
+        )
+        response = llm.call(prompt)
+        text = response if isinstance(response, str) else str(response)
+        text = text.strip()
+        if _is_summary_like(text, content):
+            if "fuente:" not in text.lower():
+                return f"{text}\n\nFuente: {candidate.name}"
+            return text
+        return _deterministic_summary(content, candidate.name)
+
+    prompt = (
+        "Responde la petición del usuario usando solo el contenido proporcionado. "
+        "Sé conciso y no inventes datos. Incluye fuente al final.\n\n"
+        f"Petición: {peticion}\n"
+        f"Archivo: {candidate.name}\n\n"
+        f"Contenido:\n{content}"
+    )
+    response = llm.call(prompt)
+    text = response if isinstance(response, str) else str(response)
+    return text.strip()
+
 
 def _extract_semantic_text_for_rules(peticion: str) -> str:
     """Aísla el contenido útil para reglas, evitando texto de instrucciones del prompt."""
@@ -247,13 +457,35 @@ Responde SOLO con el JSON, sin texto adicional."""
         """Ejecuta solo el crew de documentos."""
         print("[SUPERVISOR] Delegando a Agente de Documentos\n")
         from ejemplo1.crews.documentos_crew.documentos_crew import DocumentosCrew
+        texto_documentos = self.state["clasificacion"]["texto_documentos"]
 
-        result = DocumentosCrew().crew().kickoff(
-            inputs={"peticion": self.state["clasificacion"]["texto_documentos"]}
-        )
+        try:
+            result = DocumentosCrew().crew().kickoff(
+                inputs={"peticion": texto_documentos}
+            )
+            raw_result = result.raw
 
-        self.state["resultado_documentos"] = result.raw
-        return result.raw
+            # Si el agente alucina nombres de archivo no existentes, forzamos fallback
+            # para anclar la respuesta a documentos reales del repositorio.
+            if _contains_nonexistent_doc_references(raw_result):
+                fallback_result = _fallback_document_response(texto_documentos)
+                self.state["resultado_documentos"] = fallback_result
+                return fallback_result
+
+            self.state["resultado_documentos"] = raw_result
+            return raw_result
+        except Exception as e:
+            msg = str(e).lower()
+            tool_call_failed = (
+                "tool_use_failed" in msg
+                or "failed to call a function" in msg
+                or "tool call validation failed" in msg
+            )
+            if tool_call_failed:
+                fallback_result = _fallback_document_response(texto_documentos)
+                self.state["resultado_documentos"] = fallback_result
+                return fallback_result
+            raise
 
 
 def run():

@@ -49,14 +49,17 @@ def buscar_documentos(palabras_clave: str) -> str:
             content = _read_content(filepath).lower()
             hits = sum(content.count(kw) for kw in keywords)
             if hits > 0:
-                results.append((filepath.name, hits))
+                # Normalizar por longitud para que documentos grandes no dominen
+                normalized = hits / max(len(content) / 1000, 1)
+                results.append((filepath.name, hits, normalized))
         except Exception:
             continue
     if not results:
         return "No se encontraron documentos con esas palabras clave."
-    results.sort(key=lambda x: x[1], reverse=True)
+    results.sort(key=lambda x: x[2], reverse=True)
+    top = results[:5]
     return "Documentos encontrados (ordenados por relevancia):\n" + "\n".join(
-        f"  - {name}  (coincidencias: {hits})" for name, hits in results
+        f"  - {name}  (coincidencias: {hits})" for name, hits, _ in top
     )
 
 
