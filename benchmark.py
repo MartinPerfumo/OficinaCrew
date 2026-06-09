@@ -125,29 +125,29 @@ def ejecutar_crew(categoria: str, clasificacion: dict) -> tuple[str, float]:
 
     with silence_crewai():
         if categoria == "agenda":
-            from ejemplo1.crews.agenda_crew.agenda_crew import AgendaCrew
+            from oficinacrew.crews.agenda_crew.agenda_crew import AgendaCrew
             result = AgendaCrew().crew().kickoff(
                 inputs={"peticion": clasificacion.get("texto_agenda", "")}
             )
             salida = result.raw
 
         elif categoria == "comunicacion":
-            from ejemplo1.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew
+            from oficinacrew.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew
             result = ComunicacionCrew().crew().kickoff(
                 inputs={"peticion": clasificacion.get("texto_comunicacion", "")}
             )
             salida = result.raw
 
         elif categoria == "documentos":
-            from ejemplo1.crews.documentos_crew.documentos_crew import DocumentosCrew
+            from oficinacrew.crews.documentos_crew.documentos_crew import DocumentosCrew
             result = DocumentosCrew().crew().kickoff(
                 inputs={"peticion": clasificacion.get("texto_documentos", "")}
             )
             salida = result.raw
 
         elif categoria == "ambos":
-            from ejemplo1.crews.agenda_crew.agenda_crew import AgendaCrew
-            from ejemplo1.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew
+            from oficinacrew.crews.agenda_crew.agenda_crew import AgendaCrew
+            from oficinacrew.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew
             r1 = AgendaCrew().crew().kickoff(
                 inputs={"peticion": clasificacion.get("texto_agenda", "")}
             )

@@ -17,7 +17,7 @@ os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 from crewai import LLM
 from crewai.flow import Flow, listen, start, router
 
-#<|vq_15391|>from ejemplo1.crews.content_crew.content_crew import ContentCrew
+#from oficinacrew.crews.content_crew.content_crew import ContentCrew
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd") # Ignorar advertencias de sintaxis de pysbd
 
@@ -379,8 +379,18 @@ def _extract_semantic_text_for_rules(peticion: str) -> str:
     # Cuando viene del monitor de Gmail, el prompt incluye secciones de instrucciones
     # que contienen palabras como "reunión", "cita" o "mañana" y contaminan la
     # clasificación determinista. Nos quedamos solo con el bloque del email real.
-    email_marker = "Email recibido:"
+    
+    # Primero intentamos extraer solo el cuerpo del email
+    cuerpo_marker = "Cuerpo:"
     separator = "\n---"
+    if cuerpo_marker in text and separator in text:
+        start = text.find(cuerpo_marker) + len(cuerpo_marker)
+        end = text.find(separator, start)
+        if end > start:
+            return text[start:end].strip()
+    
+    # Fallback: extraer todo el bloque del email
+    email_marker = "Email recibido:"
     if email_marker in text and separator in text:
         start = text.find(email_marker) + len(email_marker)
         end = text.find(separator, start)
@@ -496,7 +506,9 @@ Responde SOLO con el JSON, sin texto adicional."""
         if has_document_intent and not has_scheduling_intent:
             result["categoria"] = "documentos"
             if not str(result.get("texto_documentos", "")).strip():
-                result["texto_documentos"] = peticion
+                # Usar texto semántico extraído para evitar contaminar con el prompt del gmail
+                semantic_text = _extract_semantic_text_for_rules(peticion)
+                result["texto_documentos"] = semantic_text if semantic_text != peticion.lower() else peticion
             if "texto_agenda" in result:
                 result["texto_agenda"] = ""
             if "texto_comunicacion" in result and not asks_to_write:
@@ -553,7 +565,7 @@ Responde SOLO con el JSON, sin texto adicional."""
     def handle_agenda(self):
         """Ejecuta solo el crew de agenda."""
         print("[SUPERVISOR] Delegando a Agente de Agenda\n")
-        from ejemplo1.crews.agenda_crew.agenda_crew import AgendaCrew # Importar el crew de agenda dentro del método para evitar importaciones circulares
+        from oficinacrew.crews.agenda_crew.agenda_crew import AgendaCrew # Importar el crew de agenda dentro del método para evitar importaciones circulares
 
         result = AgendaCrew().crew().kickoff(
             inputs={"peticion": self.state["clasificacion"]["texto_agenda"]}
@@ -566,7 +578,7 @@ Responde SOLO con el JSON, sin texto adicional."""
     def handle_comunicacion(self):
         """Ejecuta solo el crew de comunicación."""
         print("[SUPERVISOR] Delegando a Agente de Comunicacion\n")
-        from ejemplo1.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew # Importar el crew de comunicación dentro del método para evitar importaciones circulares
+        from oficinacrew.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew # Importar el crew de comunicación dentro del método para evitar importaciones circulares
 
         result = ComunicacionCrew().crew().kickoff(
             inputs={"peticion": self.state["clasificacion"]["texto_comunicacion"]} # Usar el texto específico para comunicación generado por el clasificador
@@ -579,8 +591,8 @@ Responde SOLO con el JSON, sin texto adicional."""
     def handle_ambos(self):
         """Ejecuta ambos crews cuando la petición lo requiere."""
         print("[SUPERVISOR] Delegando a AMBOS agentes\n")
-        from ejemplo1.crews.agenda_crew.agenda_crew import AgendaCrew
-        from ejemplo1.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew
+        from oficinacrew.crews.agenda_crew.agenda_crew import AgendaCrew
+        from oficinacrew.crews.comunicacion_crew.comunicacion_crew import ComunicacionCrew
         
         result_agenda = AgendaCrew().crew().kickoff(
             inputs={"peticion": self.state["clasificacion"]["texto_agenda"]}
@@ -598,13 +610,16 @@ Responde SOLO con el JSON, sin texto adicional."""
     def handle_documentos(self):
         """Ejecuta solo el crew de documentos."""
         print("[SUPERVISOR] Delegando a Agente de Documentos\n")
-        from ejemplo1.crews.documentos_crew.documentos_crew import DocumentosCrew
+        from oficinacrew.crews.documentos_crew.documentos_crew import DocumentosCrew
         texto_documentos = self.state["clasificacion"]["texto_documentos"]
+        print(f"[DEBUG] texto_documentos: {texto_documentos[:200] if texto_documentos else 'VACÍO'}...\n")
 
         # Para resúmenes multiempresa, usamos fallback directo para evitar
         # alucinaciones de nombres de archivo en tool-calling.
         multi = _fallback_multi_document_summary(texto_documentos)
+        print(f"[DEBUG] _fallback_multi_document_summary resultado: {bool(multi)}\n")
         if multi:
+            print(f"[DEBUG] Usando fallback multi-documento\n")
             self.state["resultado_documentos"] = multi
             return multi
 

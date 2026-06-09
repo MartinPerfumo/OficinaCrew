@@ -32,7 +32,7 @@ por determinados días de la semana como los lunes por la mañana o los viernes 
 la tarde. Cada propuesta incluirá el día, la hora de inicio y la duración estimada
 de la reunión. (En evaluación)
 
-### RF5: Resumen de agenda
+### RF5: Resumen de agenda ✅ COMPLETADO
 Se debe generar un resumen de los eventos programados dentro de un rango de
 fechas determinado. Este resumen incluirá también la identificación de posibles
 conflictos en la agenda que requieran atención por parte del usuario.

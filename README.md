@@ -27,7 +27,7 @@ Solo se activan los agentes necesarios para cada petición.
 
 ```bash
 git clone https://github.com/MartinPerfumo/Ejemplo1.git
-cd ejemplo1
+cd oficinacrew
 ```
 
 ### 2. Instalar dependencias
@@ -81,7 +81,7 @@ Cuando pregunte "¿Qué necesitas?", puedes escribir lo que desees. Algunos ejem
 ```
 También puedes ejecutar la petición directamente con: (Susituye tu petición por el campo PETICION)
 ```bash
-uv run Ejemplo1 PETICIÓN
+uv run oficinacrew PETICIÓN
 ```
 
 ## Benchmarks
@@ -193,14 +193,14 @@ El monitor mantiene un archivo `.gmail_monitor_state.json` para evitar procesar 
 ## Estructura del proyecto
 
 ```
-ejemplo1/
+oficinacrew/
 ├── .env.example                # Plantilla de configuración
 ├── pyproject.toml              # Dependencias y metadatos
 ├── benchmark.py                # Suite de benchmarks (clasificación + crews)
 ├── benchmark_cases.py          # Casos de prueba del benchmark
 ├── gmail_monitor.py            # Monitor de Gmail en tiempo real
 ├── setup_gmail.py              # Setup de autenticación OAuth2 (Google)
-└── src/ejemplo1/
+└── src/oficinacrew/
     ├── main.py                 # Flow supervisor (clasificación + routing)
     └── crews/
         ├── agenda_crew/        # Agente especializado en agenda

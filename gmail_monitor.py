@@ -23,6 +23,12 @@ import os
 import re
 import sys
 import time
+
+# Forzar UTF-8 en stdout/stderr para evitar UnicodeEncodeError con emojis de CrewAI en Windows
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    import io
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 from textwrap import shorten
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -86,7 +92,7 @@ def analyze_email_urgency_and_actions(email: dict) -> dict:
     """Analiza urgencia y acciones pendientes (RF1/RF3) con fallback robusto."""
     try:
         sys.path.insert(0, str(Path(__file__).parent / "src"))
-        from src.ejemplo1.main import _call_llm_with_fallback
+        from src.oficinacrew.main import _call_llm_with_fallback
 
         prompt = f"""Analiza este email y responde SOLO con JSON válido.
 
@@ -255,7 +261,7 @@ def send_system_notification(title: str, message: str):
             system_notification.notify(
                 title=title,
                 message=message,
-                app_name="Ejemplo1 Gmail Monitor",
+                app_name="OficinaCrew Gmail Monitor",
                 timeout=8,
             )
     except Exception as e:
@@ -358,21 +364,30 @@ def get_email_body(service, message_id: str) -> dict:
         message_id_header = next((h["value"] for h in headers if h["name"].lower() == "message-id"), "")
         references_header = next((h["value"] for h in headers if h["name"].lower() == "references"), "")
 
-        # Intentar extraer el cuerpo
+        # Intentar extraer el cuerpo (plain text primero, HTML como fallback)
         body = ""
+        html_body = ""
         if "parts" in message["payload"]:
             for part in message["payload"]["parts"]:
                 if part["mimeType"] == "text/plain":
                     data = part["body"].get("data", "")
                     if data:
-                        import base64
                         body = base64.urlsafe_b64decode(data).decode("utf-8")
                     break
+                elif part["mimeType"] == "text/html" and not html_body:
+                    data = part["body"].get("data", "")
+                    if data:
+                        raw_html = base64.urlsafe_b64decode(data).decode("utf-8")
+                        # Eliminar etiquetas HTML básicas para quedarse solo con texto
+                        html_body = re.sub(r"<[^>]+>", " ", raw_html)
+                        html_body = re.sub(r"\s+", " ", html_body).strip()
         else:
             data = message["payload"]["body"].get("data", "")
             if data:
-                import base64
                 body = base64.urlsafe_b64decode(data).decode("utf-8")
+        # Si no hay texto plano, usar el HTML limpio como fallback
+        if not body.strip() and html_body:
+            body = html_body
 
         return {
             "message_id": message_id,
@@ -387,13 +402,20 @@ def get_email_body(service, message_id: str) -> dict:
         logger.error(f"Error extrayendo email {message_id}: {e}")
         return None
 
-def get_new_emails(service, max_results: int = 5) -> list[dict]:
-    """Obtiene los últimos emails no leídos de la bandeja de entrada."""
+def get_new_emails(service, max_results: int = 5, include_read: bool = False) -> list[dict]:
+    """Obtiene los últimos emails de la bandeja de entrada.
+    
+    Args:
+        service: Gmail API service
+        max_results: Número máximo de emails a obtener
+        include_read: Si True, incluye también emails ya leídos (útil para testing)
+    """
     try:
+        query = "in:inbox" if include_read else "is:unread"
         results = (
             service.users()
             .messages()
-            .list(userId="me", q="is:unread", maxResults=max_results)
+            .list(userId="me", q=query, maxResults=max_results)
             .execute()
         )
         messages = results.get("messages", [])
@@ -517,6 +539,33 @@ def send_email_reply(
         },
     ).execute()
 
+
+def create_email_reply_draft(
+    service,
+    to_email: str,
+    subject: str,
+    body: str,
+    thread_id: str | None = None,
+    in_reply_to: str | None = None,
+    references: str | None = None,
+):
+    """Crea un borrador de respuesta en Gmail (sin enviarlo)."""
+    message = MIMEText(body, "plain", "utf-8")
+    message["To"] = to_email
+    message["Subject"] = subject.strip()
+    if in_reply_to:
+        message["In-Reply-To"] = in_reply_to
+    if references:
+        message["References"] = references
+    elif in_reply_to:
+        message["References"] = in_reply_to
+
+    raw = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
+    body_payload = {"message": {"raw": raw}}
+    if thread_id:
+        body_payload["message"]["threadId"] = thread_id
+    return service.users().drafts().create(userId="me", body=body_payload).execute()
+
 def build_reply_body(email: dict, suggestion_text: str) -> str:
     """Construye la respuesta incluyendo el correo original citado al final."""
     original_subject = email.get("subject", "Sin asunto")
@@ -618,6 +667,18 @@ def parse_selected_alternative_slot(
 def _extract_explicit_time(text: str) -> tuple[int, int] | None:
     """Extrae una hora explícita si aparece; si no, devuelve None."""
     normalized = text.lower()
+
+    # Formato AM/PM americano: "3pm", "3 pm", "3:30pm", "13pm" → convertir a 24h primero
+    ampm_match = re.search(r"\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*(am|pm)\b", normalized)
+    if ampm_match:
+        hour = int(ampm_match.group(1))
+        minute = int(ampm_match.group(2)) if ampm_match.group(2) else 0
+        suffix = ampm_match.group(3)
+        if suffix == "pm" and hour != 12:
+            hour += 12
+        elif suffix == "am" and hour == 12:
+            hour = 0
+        return hour, minute
 
     patterns = [
         r"\b(?:a\s+las\s+)?([01]?\d|2[0-3]):([0-5]\d)\b",
@@ -841,12 +902,212 @@ def _parse_event_datetimes_from_sources(sources: list[str], reference_dt: dateti
 
     return fallback_start, fallback_end
 
+def has_agenda_summary_intent(text: str) -> bool:
+    """Detecta si el texto es una consulta de resumen/consulta de agenda (no de creación de evento)."""
+    normalized = (text or "").lower()
+    return bool(re.search(
+        # Preguntas directas: "qué X tengo", "qué tengo", "qué hay"
+        r"qu[eé]\s+(\w+\s+)?tengo|qu[eé]\s+hay"
+        # Consultar/ver agenda
+        r"|ver\s+(mi\s+)?agenda|mi\s+agenda|mis\s+eventos|mis\s+citas"
+        # Resumen de agenda/semana/mes/día
+        r"|resumen\s+de\s+(mi\s+)?(agenda|semana|mes|d[ií]a)"
+        r"|hazme\s+(un\s+)?resumen|hacer\s+(un\s+)?resumen\s+de"
+        # Consultar agenda
+        r"|consultar?\s+(mi\s+)?agenda"
+        # Eventos/citas/reuniones que tengo
+        r"|(citas?|reuniones?|eventos?)\s+(que\s+)?tengo"
+        r"|tengo\s+(algo|alguna?\s+(cita|reuni[oó]n|cosa)|alg[uú]n\s+evento)"
+        r"|hay\s+algo|hay\s+alguna?\s+(cita|reuni[oó]n|evento)"
+        # Formas con día específico: "tengo algo el viernes", "tengo alguna cita mañana"
+        r"|tengo\s+algo\s+(el|la|este|esta|mañana|hoy|pa[sí]ado)"
+        # Cuantos eventos/citas
+        r"|cu[aá]ntos?\s+(eventos?|citas?|reuniones?)"
+        # Agenda del/de la/para
+        r"|agenda\s+(del?|de\s+la\s+|para\s+|esta\s+|de\s+esta\s+|la\s+pr[oó]xima\s+)"
+        # Disponibilidad
+        r"|disponibilidad",
+        normalized,
+    ))
+
+
+def parse_date_range_for_summary(text: str, reference_dt: datetime) -> tuple[datetime, datetime]:
+    """
+    Analiza el texto y devuelve (start_dt, end_dt) para consulta de agenda.
+    Por defecto devuelve los próximos 7 días desde hoy.
+    """
+    normalized = (text or "").lower()
+    today = reference_dt.date()
+    tz = reference_dt.tzinfo
+
+    def _start_of_day(d):
+        return datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=tz)
+
+    def _end_of_day(d):
+        return datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=tz)
+
+    # "pasado mañana"
+    if re.search(r"\bpasado\s*(mañana|manana)\b", normalized):
+        day_after = today + timedelta(days=2)
+        return _start_of_day(day_after), _end_of_day(day_after)
+
+    # "mañana" (pero no "pasado mañana")
+    if re.search(r"\b(mañana|manana)\b", normalized):
+        tomorrow = today + timedelta(days=1)
+        return _start_of_day(tomorrow), _end_of_day(tomorrow)
+
+    # "hoy"
+    if re.search(r"\bhoy\b", normalized):
+        return _start_of_day(today), _end_of_day(today)
+
+    # "próxima semana" / "la semana que viene"
+    if re.search(r"\b(pr[oó]xima\s+semana|semana\s+que\s+viene|siguiente\s+semana)\b", normalized):
+        monday = today - timedelta(days=today.weekday()) + timedelta(weeks=1)
+        sunday = monday + timedelta(days=6)
+        return _start_of_day(monday), _end_of_day(sunday)
+
+    # "esta semana" / "la semana"
+    if re.search(r"\b(esta\s+semana|semana\s+actual|la\s+semana)\b", normalized):
+        monday = today - timedelta(days=today.weekday())
+        sunday = monday + timedelta(days=6)
+        return _start_of_day(monday), _end_of_day(sunday)
+
+    # "este mes"
+    if re.search(r"\b(este\s+mes|mes\s+actual)\b", normalized):
+        import calendar as cal_mod
+        start = today.replace(day=1)
+        last_day = cal_mod.monthrange(today.year, today.month)[1]
+        end = today.replace(day=last_day)
+        return _start_of_day(start), _end_of_day(end)
+
+    # Rango explícito: "del 5 al 10 de junio"
+    range_match = re.search(
+        r"\bdel?\s+(\d{1,2})\s+al?\s+(\d{1,2})\s+de\s+([a-záéíóú]+)\b",
+        normalized,
+    )
+    if range_match:
+        day1 = int(range_match.group(1))
+        day2 = int(range_match.group(2))
+        month = MONTH_MAP.get(range_match.group(3))
+        if month:
+            year = reference_dt.year
+            try:
+                from datetime import date as _date
+                return _start_of_day(_date(year, month, day1)), _end_of_day(_date(year, month, day2))
+            except ValueError:
+                pass
+
+    # Fecha única: "25 de junio"
+    single_match = re.search(
+        r"\b(\d{1,2})\s+de\s+([a-záéíóú]+)(?:\s+de\s+(\d{4}))?\b",
+        normalized,
+    )
+    if single_match:
+        day = int(single_match.group(1))
+        month = MONTH_MAP.get(single_match.group(2))
+        if month:
+            year = int(single_match.group(3)) if single_match.group(3) else reference_dt.year
+            try:
+                from datetime import date as _date
+                d = _date(year, month, day)
+                return _start_of_day(d), _end_of_day(d)
+            except ValueError:
+                pass
+
+    # Día de la semana: "el lunes", "el viernes"
+    for name, weekday_num in WEEKDAY_MAP.items():
+        if re.search(rf"\b{name}\b", normalized):
+            days_ahead = (weekday_num - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            target_day = today + timedelta(days=days_ahead)
+            return _start_of_day(target_day), _end_of_day(target_day)
+
+    # Por defecto: próximos 7 días
+    return _start_of_day(today), _end_of_day(today + timedelta(days=7))
+
+
+def build_agenda_summary_text(events: list[dict], start_dt: datetime, end_dt: datetime) -> str:
+    """Formatea un resumen legible de eventos del calendario, marcando conflictos."""
+    DAYS_ES = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+    MONTHS_ES = [
+        "enero", "febrero", "marzo", "abril", "mayo", "junio",
+        "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"
+    ]
+    tz = start_dt.tzinfo
+
+    same_day = start_dt.date() == end_dt.date()
+    if same_day:
+        period = f"del {DAYS_ES[start_dt.weekday()]} {start_dt.day} de {MONTHS_ES[start_dt.month - 1]}"
+    else:
+        period = (
+            f"del {start_dt.day} de {MONTHS_ES[start_dt.month - 1]}"
+            f" al {end_dt.day} de {MONTHS_ES[end_dt.month - 1]}"
+        )
+
+    if not events:
+        return f"No hay eventos programados {period}."
+
+    # Agrupar por día
+    from collections import defaultdict
+    by_day: dict = defaultdict(list)
+    for ev in events:
+        start_val = ev.get("start", {})
+        dt_str = start_val.get("dateTime") or start_val.get("date", "")
+        if "T" in dt_str:
+            ev_start = datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(tz)
+        else:
+            ev_start = datetime.fromisoformat(dt_str).replace(hour=0, minute=0, tzinfo=tz)
+        by_day[ev_start.date()].append((ev_start, ev))
+
+    # Detectar conflictos (solapamientos dentro del mismo día)
+    conflict_ids: set[str] = set()
+    for day_events in by_day.values():
+        sorted_evs = sorted(day_events, key=lambda x: x[0])
+        for i in range(len(sorted_evs)):
+            ev_i_start, ev_i = sorted_evs[i]
+            ev_i_end_str = (ev_i.get("end", {}).get("dateTime") or ev_i.get("end", {}).get("date", ""))
+            if "T" in ev_i_end_str:
+                ev_i_end = datetime.fromisoformat(ev_i_end_str.replace("Z", "+00:00")).astimezone(tz)
+            else:
+                ev_i_end = ev_i_start + timedelta(hours=1)
+            for j in range(i + 1, len(sorted_evs)):
+                ev_j_start, _ = sorted_evs[j]
+                if ev_j_start < ev_i_end:
+                    conflict_ids.add(ev_i.get("id", f"ev{i}"))
+                    conflict_ids.add(sorted_evs[j][1].get("id", f"ev{j}"))
+
+    lines = [f"Agenda {period}:", ""]
+    for day_date in sorted(by_day.keys()):
+        day_name = DAYS_ES[day_date.weekday()]
+        month_name = MONTHS_ES[day_date.month - 1]
+        lines.append(f"  {day_name} {day_date.day} de {month_name}:")
+        for ev_start, ev in sorted(by_day[day_date], key=lambda x: x[0]):
+            title = ev.get("summary", "Sin título")
+            end_str = (ev.get("end", {}).get("dateTime") or ev.get("end", {}).get("date", ""))
+            if "T" in end_str:
+                ev_end = datetime.fromisoformat(end_str.replace("Z", "+00:00")).astimezone(tz)
+                time_range = f"{ev_start.strftime('%H:%M')} - {ev_end.strftime('%H:%M')}"
+            elif ev.get("start", {}).get("date"):
+                time_range = "Todo el día"
+            else:
+                time_range = ev_start.strftime("%H:%M")
+            marker = " ⚠ CONFLICTO" if ev.get("id", "") in conflict_ids else ""
+            lines.append(f"    • {time_range}: {title}{marker}")
+        lines.append("")
+
+    if conflict_ids:
+        lines.append("⚠ Atención: hay conflictos de horario en los eventos marcados.")
+
+    return "\n".join(lines)
+
+
 def has_explicit_scheduling_intent(text: str) -> bool:
     """Devuelve True solo si el texto expresa intención de agendar explícitamente."""
     normalized = (text or "").lower()
     has_schedule_verbs = bool(
         re.search(
-            r"\b(fijar|fija|fijamos|programar|programa|programamos|reprogramar|reprograma|agendar|agenda|agendamos|convocar|convoca|convocamos|calendarizar|calendariza|calendarizamos|reservar|reserva|reservamos|reconfirmar|reconfirma|reconfirmamos|crear\s+(evento|cita)|organizar|organiza|organizamos|coordinar|coordina|coordinamos)\b|\b(organizar|organiza|organizamos|coordinar|coordina|coordinamos|reservar|reserva|reservamos)\s+(una\s+)?(reunion|reunión|cita)\b|\b(dejarla\s+reservada|dejar\s+reservada|quedar\s+reservada|quede\s+reservada|quedar\s+la\s+reservada)\b",
+            r"\b(fijar|fija|fijamos|programar|programa|programamos|reprogramar|reprograma|agendar|agendamos|convocar|convoca|convocamos|calendarizar|calendariza|calendarizamos|reservar|reserva|reservamos|reconfirmar|reconfirma|reconfirmamos|crear\s+(evento|cita|reuni[oó]n)|organizar|organiza|organizamos|coordinar|coordina|coordinamos|ponme|p[oó]nme|cr[eé]ame|crea|creame)\b|\b(organizar|organiza|organizamos|coordinar|coordina|coordinamos|reservar|reserva|reservamos)\s+(una\s+)?(reunion|reuni[oó]n|cita)\b|\b(dejarla\s+reservada|dejar\s+reservada|quedar\s+reservada|quede\s+reservada|quedar\s+la\s+reservada)\b",
             normalized,
         )
     )
@@ -1240,39 +1501,43 @@ def create_calendar_event_from_text(calendar_service, event_text: str, email: di
 def procesar_email_con_crewai(email: dict) -> dict:
     """Procesa un email con SupervisorFlow."""
     sys.path.insert(0, str(Path(__file__).parent / "src"))
-    from src.ejemplo1.main import SupervisorFlow
+    from src.oficinacrew.main import SupervisorFlow
 
+    # El asunto se incluye también en el cuerpo para mejorar la detección cuando el body está vacío
+    body_content = email['body'].strip() or email['subject']
     prompt = f"""Email recibido:
 
 De: {email['sender']}
 Asunto: {email['subject']}
 
 Cuerpo:
-{email['body']}
-
----
-
-Por favor:
-1. Resume el contenido del email
-2. Sugiere una respuesta automática apropiada (profesional pero concisa)
-3. Categoriza el tipo de email (agenda, comunicacion, documentos, ambos)
-
-Regla de prioridad:
-- Si el email propone o fija una reunion/cita con fecha y/o hora y además requiere respuesta, usa ambos.
-- Si solo contiene la reunion/cita y no requiere respuesta, usa agenda.
-- Si la reunion es solo contexto (ej: "tengo reunion manana") pero la petición principal es de documentos, usa documentos.
-- Frases de cortesia ("gracias", "quedo a la espera", "un saludo") no cambian la categoria por si solas.
+{body_content}
 """
 
     try:
         logger.info(f"Procesando email: {email['subject']}")
         flow = SupervisorFlow()
-        result = flow.kickoff(inputs={"peticion": prompt})
+        result = None
+        try:
+            result = flow.kickoff(inputs={"peticion": prompt})
+        except Exception as kickoff_err:
+            # En Windows, CrewAI puede lanzar UnicodeEncodeError por los emojis del panel
+            # de progreso. El flow puede haber completado correctamente igual: comprobamos
+            # el state antes de propagar el error.
+            if not flow.state.get("clasificacion"):
+                raise kickoff_err
+            logger.warning(f"Excepción tras kickoff (posible error de encoding en consola): {kickoff_err}")
+
         clasificacion = flow.state.get("clasificacion", {})
+        resultado_documentos = flow.state.get("resultado_documentos", "")
+        # Si kickoff falló pero el flow completó documentos, usar resultado_documentos como resumen
+        if result is None and resultado_documentos:
+            result = resultado_documentos
         analisis_email = analyze_email_urgency_and_actions(email)
         return {
             "success": True,
             "resumen": result,
+            "resultado_documentos": resultado_documentos,
             "email_id": email["message_id"],
             "clasificacion": clasificacion,
             "analisis_email": analisis_email,
@@ -1309,6 +1574,182 @@ def guardar_state(state: dict):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=2)
 
+
+# ─── Procesamiento de email individual (reutilizable) ─────────────────────
+
+def process_single_email_postactions(
+    service,
+    calendar_service,
+    email: dict,
+    resultado: dict,
+    test_mode: bool = False,
+    log_fn=None,
+    event_fn=None,
+):
+    """
+    Procesa las acciones post-análisis de un email (calendario, respuestas, borradores).
+
+    Args:
+        service: Gmail API service
+        calendar_service: Calendar API service
+        email: dict con datos del email (subject, sender, message_id, thread_id, etc.)
+        resultado: dict devuelto por procesar_email_con_crewai()
+        test_mode: si True, no envía emails ni modifica nada
+        log_fn: callback para logging, firma: log_fn(msg: str)
+        event_fn: callback para eventos UI, firma: event_fn(tipo: str, titulo: str, detalle: str)
+
+    Returns:
+        dict con resultado actualizado (puede incluir calendar_result, etc.)
+    """
+    def _log(msg):
+        if log_fn:
+            log_fn(msg)
+        else:
+            logger.info(msg)
+
+    def _event(tipo, titulo, detalle):
+        if event_fn:
+            event_fn(tipo, titulo, detalle)
+
+    if not resultado.get("success"):
+        _log(f"⚠ Error: {resultado.get('error', '?')}")
+        return resultado
+
+    clasificacion = resultado.get("clasificacion", {})
+    categoria = str(clasificacion.get("categoria", "")).strip().lower()
+    subject = email.get("subject", "Sin asunto")
+    sender = email.get("sender", "")
+    sender_email = extract_email_address(sender)
+
+    _log(f"→ Categoría: {categoria}")
+    _event("email", f"Email procesado: {subject}", f"De: {sender} | Categoría: {categoria}")
+
+    # ─── Agenda ───────────────────────────────────────────────────────────
+    if categoria in {"agenda", "ambos"}:
+        event_text = str(clasificacion.get("texto_agenda", "")).strip()
+        if not event_text:
+            event_text = f"Reunión sobre: {subject}"
+        calendar_result = create_calendar_event_from_text(calendar_service, event_text, email)
+        resultado["calendar_result"] = calendar_result
+
+        # Confirmación de cita creada
+        if calendar_result.get("created") and not calendar_result.get("conflict") and not test_mode:
+            if sender_email:
+                start_text = calendar_result.get("start")
+                end_text = calendar_result.get("end")
+                if start_text and end_text:
+                    confirmation_text = (
+                        "Hola,\n\n"
+                        f"La cita ha quedado confirmada para el {datetime.fromisoformat(start_text).strftime('%d/%m/%Y a las %H:%M')} "
+                        f"hasta {datetime.fromisoformat(end_text).strftime('%H:%M')}.\n\n"
+                        "Queda reservada en mi agenda.\n\nUn saludo."
+                    )
+                    reply_body = build_reply_body(email, confirmation_text)
+                    try:
+                        send_email_reply(
+                            service, sender_email,
+                            email.get("subject", "Reunión"),
+                            reply_body,
+                            thread_id=email.get("thread_id"),
+                            in_reply_to=email.get("message_id_header"),
+                            references=email.get("references_header") or email.get("message_id_header"),
+                        )
+                        _log(f"→ Confirmación enviada a {sender_email}")
+                        _event(
+                            "confirmacion",
+                            f"Reunión confirmada: {subject}",
+                            f"{datetime.fromisoformat(start_text).strftime('%d/%m/%Y %H:%M')} - "
+                            f"{datetime.fromisoformat(end_text).strftime('%H:%M')} → {sender_email}",
+                        )
+                    except Exception as e:
+                        _log(f"⚠ Error enviando confirmación: {e}")
+
+        # Conflicto de agenda → enviar alternativas
+        if calendar_result.get("conflict") and not test_mode:
+            add_label(service, email["message_id"], label_name="CrewAI-Conflicto-Agenda")
+            suggested_options = calendar_result.get("suggested_options", [])
+            if sender_email and suggested_options:
+                options_lines = []
+                for idx, option in enumerate(suggested_options[:3], start=1):
+                    option_start = datetime.fromisoformat(option["start"])
+                    option_end = datetime.fromisoformat(option["end"])
+                    dur = option.get("duration_minutes", 60)
+                    options_lines.append(
+                        f"{idx}. {option_start.strftime('%d/%m/%Y a las %H:%M')} hasta "
+                        f"{option_end.strftime('%H:%M')} ({dur} min)"
+                    )
+                suggestion_text = (
+                    "Hola,\n\n"
+                    "He revisado mi agenda y no tengo hueco en la franja solicitada.\n\n"
+                    "Te propongo estas opciones alternativas:\n"
+                    + "\n".join(options_lines) + "\n\n"
+                    "Si te encaja alguna, responde indicando el número de opción.\n\nUn saludo."
+                )
+                reply_body = build_reply_body(email, suggestion_text)
+                try:
+                    send_email_reply(
+                        service, sender_email,
+                        email.get("subject", "Reunión"),
+                        reply_body,
+                        thread_id=email.get("thread_id"),
+                        in_reply_to=email.get("message_id_header"),
+                        references=email.get("references_header") or email.get("message_id_header"),
+                    )
+                    _log(f"→ Alternativas enviadas a {sender_email}")
+                    _event(
+                        "conflicto",
+                        f"Conflicto de agenda: {subject}",
+                        f"Se enviaron {len(suggested_options[:3])} opciones alternativas a {sender_email}",
+                    )
+                except Exception as e:
+                    _log(f"⚠ Error enviando alternativas: {e}")
+
+    # ─── Documentos → crear borrador ──────────────────────────────────────
+    if categoria == "documentos":
+        doc_output = str(resultado.get("resultado_documentos") or resultado.get("resumen", "")).strip()
+        if sender_email and doc_output:
+            if not test_mode:
+                doc_reply_text = (
+                    "Hola,\n\n"
+                    "He procesado tu solicitud sobre documentos. "
+                    "Te dejo el resumen preparado para revisión y envío:\n\n"
+                    f"{doc_output}\n\n"
+                    "Un saludo."
+                )
+                reply_body = build_reply_body(email, doc_reply_text)
+                try:
+                    draft = create_email_reply_draft(
+                        service, sender_email,
+                        email.get("subject", "Respuesta sobre documentos"),
+                        reply_body,
+                        thread_id=email.get("thread_id"),
+                        in_reply_to=email.get("message_id_header"),
+                        references=email.get("references_header") or email.get("message_id_header"),
+                    )
+                    _log(f"→ Borrador de documentos creado para {sender_email}")
+                    _event(
+                        "email",
+                        f"Borrador creado: {subject}",
+                        f"Resumen de documentos listo para revisión → {sender_email}",
+                    )
+                except Exception as e:
+                    _log(f"⚠ Error creando borrador de documentos: {e}")
+            else:
+                _log("[TEST MODE] Se habría creado borrador de documentos")
+        else:
+            if not doc_output:
+                _log("⚠ Resumen vacío, no se crea borrador")
+            if not sender_email:
+                _log("⚠ No se pudo extraer email del remitente")
+
+    # Marcar como leído y etiquetar
+    if not test_mode:
+        mark_as_read(service, email["message_id"])
+        add_label(service, email["message_id"])
+
+    return resultado
+
+
 # ─── Loop principal ───────────────────────────────────────────────────────
 
 def monitor_loop(service, calendar_service, intervalo: int = 30, test_mode: bool = False, test_count: int = 2):
@@ -1333,26 +1774,29 @@ def monitor_loop(service, calendar_service, intervalo: int = 30, test_mode: bool
         while True:
             processed_count = 0
             skipped_count = 0
-            emails = get_new_emails(service, max_results=test_count if test_mode else 5)
+            # En modo test, incluir también emails ya leídos para poder reprocesar
+            emails = get_new_emails(service, max_results=test_count if test_mode else 5, include_read=test_mode)
             baseline_unread_ids = set(state.get("baseline_unread_ids", []))
 
             if emails:
                 logger.info(f"Encontrados {len(emails)} email(s) nuevo(s)")
 
                 for email in emails:
-                    # No procesar si ya fue procesado
-                    if email["message_id"] in state["ultimos_emails"]:
-                        skipped_count += 1
-                        logger.debug(f"Email {email['subject']} ya fue procesado, saltando...")
-                        continue
+                    # En modo test, no filtramos por emails ya procesados
+                    if not test_mode:
+                        # No procesar si ya fue procesado
+                        if email["message_id"] in state["ultimos_emails"]:
+                            skipped_count += 1
+                            logger.debug(f"Email {email['subject']} ya fue procesado, saltando...")
+                            continue
 
-                    # Ignorar no leídos que ya existían cuando arrancó el monitor
-                    if email["message_id"] in baseline_unread_ids:
-                        skipped_count += 1
-                        logger.debug(
-                            f"Email {email['subject']} ya estaba no leído al iniciar, saltando..."
-                        )
-                        continue
+                        # Ignorar no leídos que ya existían cuando arrancó el monitor
+                        if email["message_id"] in baseline_unread_ids:
+                            skipped_count += 1
+                            logger.debug(
+                                f"Email {email['subject']} ya estaba no leído al iniciar, saltando..."
+                            )
+                            continue
 
                     logger.info(f"Procesando: {email['subject']} de {email['sender']}")
 
@@ -1363,34 +1807,62 @@ def monitor_loop(service, calendar_service, intervalo: int = 30, test_mode: bool
                         logger.info(f"Email procesado correctamente")
                         clasificacion = resultado.get("clasificacion", {})
                         categoria = str(clasificacion.get("categoria", "")).strip().lower()
+                        
+                        # Mostrar resultado del flow en terminal
+                        flow_result = str(resultado.get("resumen", "")).strip()
+                        if flow_result:
+                            print("\n" + "=" * 72)
+                            print("RESULTADO DEL FLOW")
+                            print("=" * 72)
+                            print(flow_result)
+                            print("=" * 72 + "\n")
+
                         analisis_email = resultado.get("analisis_email", {})
+                        urgencia_val = analisis_email.get("urgencia", "no urgente")
+                        justificacion_val = analisis_email.get("justificacion_urgencia", "")
+                        acciones = analisis_email.get("acciones_pendientes", [])
+
+                        # ── RF1 / RF3: Bloque prominente de urgencia y acciones ──
+                        BOLD  = "\033[1m"
+                        RED   = "\033[91m"
+                        YEL   = "\033[93m"
+                        GRN   = "\033[92m"
+                        CYAN  = "\033[96m"
+                        RESET = "\033[0m"
+
+                        urg_color = RED if urgencia_val == "urgente" else (YEL if urgencia_val == "no urgente" else GRN)
+                        print("\n" + "█" * 72)
+                        print(f"  {BOLD}RF1 · CLASIFICACIÓN DE URGENCIA{RESET}")
+                        print("█" * 72)
+                        print(f"  Urgencia   : {urg_color}{BOLD}{urgencia_val.upper()}{RESET}")
+                        print(f"  Justifica. : {justificacion_val}")
+                        if acciones:
+                            print(f"\n  {BOLD}RF3 · ACCIONES PENDIENTES{RESET}  ({len(acciones)} detectadas)")
+                            for i, a in enumerate(acciones, 1):
+                                partes = [f"  {i}. {CYAN}{a.get('accion','')}{RESET}"]
+                                if a.get("responsable"):
+                                    partes.append(f"     Responsable: {a['responsable']}")
+                                if a.get("fecha_limite"):
+                                    partes.append(f"     Fecha límite: {a['fecha_limite']}")
+                                prio = a.get("prioridad", "media")
+                                pc = RED if prio == "alta" else (YEL if prio == "media" else GRN)
+                                partes.append(f"     Prioridad: {pc}{prio}{RESET}")
+                                print("\n".join(partes))
+                        else:
+                            print(f"\n  {BOLD}RF3 · ACCIONES PENDIENTES{RESET}  : Ninguna detectada")
+                        print("█" * 72 + "\n")
+
                         readable_summary = build_readable_summary(email, resultado)
-                        print("\n" + "=" * 72)
+                        print("=" * 72)
                         print("RESUMEN DE PROCESAMIENTO")
                         print("=" * 72)
                         print(readable_summary)
                         print("=" * 72 + "\n")
-                        logger.info(
-                            "Urgencia: %s | Justificación: %s",
-                            analisis_email.get("urgencia", "no urgente"),
-                            analisis_email.get("justificacion_urgencia", ""),
-                        )
+
                         send_system_notification(
-                            title=f"Ejemplo1: {email.get('subject', 'Sin asunto')}",
+                            title=f"OficinaCrew: {email.get('subject', 'Sin asunto')}",
                             message=_truncate(readable_summary, 240),
                         )
-                        acciones = analisis_email.get("acciones_pendientes", [])
-                        if acciones:
-                            logger.info("Acciones pendientes detectadas: %s", len(acciones))
-                            for i, accion in enumerate(acciones, start=1):
-                                logger.info(
-                                    "  %s) %s | responsable=%s | fecha_limite=%s | prioridad=%s",
-                                    i,
-                                    accion.get("accion", ""),
-                                    accion.get("responsable", ""),
-                                    accion.get("fecha_limite", ""),
-                                    accion.get("prioridad", "media"),
-                                )
 
                         if categoria in {"agenda", "ambos"}:
                             event_text = str(clasificacion.get("texto_agenda", "")).strip()
@@ -1505,6 +1977,47 @@ def monitor_loop(service, calendar_service, intervalo: int = 30, test_mode: bool
                                         )
                                     except Exception as e:
                                         logger.warning(f"No se pudo enviar aviso de conflicto (fallback): {e}")
+
+                        # Enviar respuesta por correo para categoría "documentos"
+                        if categoria == "documentos":
+                            sender_email = extract_email_address(email.get("sender", ""))
+                            # Priorizar resultado_documentos del state; caer en resumen como fallback
+                            doc_output = str(resultado.get("resultado_documentos") or resultado.get("resumen", "")).strip()
+                            logger.info(f"[DOCUMENTOS] Resultado obtenido ({len(doc_output)} chars) para remitente '{sender_email}'")
+                            if not doc_output:
+                                logger.warning("[DOCUMENTOS] El resumen está vacío, no se crea borrador")
+                            if not sender_email:
+                                logger.warning("[DOCUMENTOS] No se pudo extraer email del remitente, no se crea borrador")
+                            if sender_email and doc_output:
+                                if not test_mode:
+                                    doc_reply_text = (
+                                        "Hola,\n\n"
+                                        "He procesado tu solicitud sobre documentos. "
+                                        "Te dejo el resumen preparado para revisión y envío:\n\n"
+                                        f"{doc_output}\n\n"
+                                        "Un saludo."
+                                    )
+                                    reply_body = build_reply_body(email, doc_reply_text)
+                                    try:
+                                        draft = create_email_reply_draft(
+                                            service,
+                                            sender_email,
+                                            email.get("subject", "Respuesta sobre documentos"),
+                                            reply_body,
+                                            thread_id=email.get("thread_id"),
+                                            in_reply_to=email.get("message_id_header"),
+                                            references=email.get("references_header") or email.get("message_id_header"),
+                                        )
+                                        logger.info(
+                                            "Borrador de respuesta de documentos creado para %s (draft_id: %s, thread: %s)",
+                                            sender_email,
+                                            draft.get("id", ""),
+                                            email.get("thread_id", ""),
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"No se pudo crear borrador de documentos: {e}")
+                                else:
+                                    logger.info("[TEST MODE] Se habría creado borrador de respuesta de documentos")
 
                         print_compact_status(email, resultado)
                         notification_title, notification_message = build_action_notification(email, resultado)

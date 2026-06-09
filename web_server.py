@@ -8,6 +8,8 @@ Uso:
 """
 
 import argparse
+from html import escape as html_escape
+import io
 import json
 import logging
 import os
@@ -17,12 +19,19 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# Forzar UTF-8 en stdout/stderr para evitar UnicodeEncodeError con emojis de CrewAI en Windows
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
 os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
+
+from ui_test_cases import UI_REQUIREMENT_CASES
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -42,12 +51,15 @@ gmail_monitor_state = {
     "intervalo": 30,
     "logs": [],          # últimos N mensajes de log del monitor
     "events": [],        # notificaciones de la UI (confirmaciones, conflictos, etc.)
+    "correos": [],       # inbox de correos procesados para la pestaña Correos
+    "correos_sin_leer": 0,
 }
 _gmail_lock = threading.Lock()
 _gmail_stop_event = threading.Event()
 
 MAX_MONITOR_LOGS = 50
 MAX_EVENTS = 30
+MAX_CORREOS = 50
 
 
 def _add_monitor_log(msg: str):
@@ -76,11 +88,9 @@ def _add_event(tipo: str, titulo: str, detalle: str):
 def _gmail_monitor_thread(intervalo: int):
     """Hilo que ejecuta el monitor de Gmail en background."""
     try:
-        from gmail_monitor import get_google_services, monitor_loop, get_new_emails, \
-            get_unread_message_ids, procesar_email_con_crewai, build_readable_summary, \
-            print_compact_status, build_action_notification, send_system_notification, \
-            mark_as_read, add_label, create_calendar_event_from_text, extract_email_address, \
-            send_email_reply, build_reply_body, cargar_state, guardar_state, _truncate
+        from gmail_monitor import get_google_services, get_new_emails, \
+            get_unread_message_ids, procesar_email_con_crewai, \
+            cargar_state, guardar_state, process_single_email_postactions
 
         _add_monitor_log("Conectando con Google APIs...")
         service, calendar_service = get_google_services()
@@ -120,99 +130,18 @@ def _gmail_monitor_thread(intervalo: int):
                         if resultado["success"]:
                             with _gmail_lock:
                                 gmail_monitor_state["emails_procesados"] += 1
+                                _store_correo(email, resultado)
 
-                            clasificacion = resultado.get("clasificacion", {})
-                            categoria = str(clasificacion.get("categoria", "")).strip().lower()
-                            _add_monitor_log(f"  → Categoría: {categoria}")
-                            _add_event("email", f"Email procesado: {subject}",
-                                       f"De: {sender} | Categoría: {categoria}")
-
-                            if categoria in {"agenda", "ambos"}:
-                                event_text = str(clasificacion.get("texto_agenda", "")).strip()
-                                if not event_text:
-                                    event_text = f"Reunión sobre: {subject}"
-                                calendar_result = create_calendar_event_from_text(
-                                    calendar_service, event_text, email
-                                )
-                                resultado["calendar_result"] = calendar_result
-                                sender_email = extract_email_address(sender)
-
-                                if calendar_result.get("created") and not calendar_result.get("conflict"):
-                                    if sender_email:
-                                        start_text = calendar_result.get("start")
-                                        end_text = calendar_result.get("end")
-                                        if start_text and end_text:
-                                            confirmation_text = (
-                                                "Hola,\n\n"
-                                                f"La cita ha quedado confirmada para el "
-                                                f"{datetime.fromisoformat(start_text).strftime('%d/%m/%Y a las %H:%M')} "
-                                                f"hasta {datetime.fromisoformat(end_text).strftime('%H:%M')}.\n\n"
-                                                "Queda reservada en mi agenda.\n\nUn saludo."
-                                            )
-                                            reply_body = build_reply_body(email, confirmation_text)
-                                            try:
-                                                send_email_reply(
-                                                    service, sender_email,
-                                                    email.get("subject", "Reunión"),
-                                                    reply_body,
-                                                    thread_id=email.get("thread_id"),
-                                                    in_reply_to=email.get("message_id_header"),
-                                                    references=email.get("references_header") or email.get("message_id_header"),
-                                                )
-                                                _add_monitor_log(f"  → Confirmación enviada a {sender_email}")
-                                                _add_event(
-                                                    "confirmacion",
-                                                    f"Reunión confirmada: {subject}",
-                                                    f"{datetime.fromisoformat(start_text).strftime('%d/%m/%Y %H:%M')} - "
-                                                    f"{datetime.fromisoformat(end_text).strftime('%H:%M')} → {sender_email}",
-                                                )
-                                            except Exception as e:
-                                                _add_monitor_log(f"  ⚠ Error enviando confirmación: {e}")
-
-                                if calendar_result.get("conflict"):
-                                    add_label(service, email["message_id"], label_name="CrewAI-Conflicto-Agenda")
-                                    suggested_options = calendar_result.get("suggested_options", [])
-                                    sender_email = extract_email_address(sender)
-                                    if sender_email and suggested_options:
-                                        options_lines = []
-                                        for idx, option in enumerate(suggested_options[:3], start=1):
-                                            option_start = datetime.fromisoformat(option["start"])
-                                            option_end = datetime.fromisoformat(option["end"])
-                                            dur = option.get("duration_minutes", 60)
-                                            options_lines.append(
-                                                f"{idx}. {option_start.strftime('%d/%m/%Y a las %H:%M')} hasta "
-                                                f"{option_end.strftime('%H:%M')} ({dur} min)"
-                                            )
-                                        suggestion_text = (
-                                            "Hola,\n\n"
-                                            "He revisado mi agenda y no tengo hueco en la franja solicitada.\n\n"
-                                            "Te propongo estas opciones alternativas:\n"
-                                            + "\n".join(options_lines) + "\n\n"
-                                            "Si te encaja alguna, responde indicando el número de opción.\n\nUn saludo."
-                                        )
-                                        reply_body = build_reply_body(email, suggestion_text)
-                                        try:
-                                            send_email_reply(
-                                                service, sender_email,
-                                                email.get("subject", "Reunión"),
-                                                reply_body,
-                                                thread_id=email.get("thread_id"),
-                                                in_reply_to=email.get("message_id_header"),
-                                                references=email.get("references_header") or email.get("message_id_header"),
-                                            )
-                                            _add_monitor_log(f"  → Alternativas enviadas a {sender_email}")
-                                            _add_event(
-                                                "conflicto",
-                                                f"Conflicto de agenda: {subject}",
-                                                f"Se enviaron {len(suggested_options[:3])} opciones alternativas a {sender_email}",
-                                            )
-                                        except Exception as e:
-                                            _add_monitor_log(f"  ⚠ Error enviando alternativas: {e}")
-
-                            mark_as_read(service, email["message_id"])
-                            add_label(service, email["message_id"])
-                        else:
-                            _add_monitor_log(f"  ⚠ Error: {resultado.get('error', '?')}")
+                        # Delegar acciones post-análisis a función reutilizable
+                        process_single_email_postactions(
+                            service,
+                            calendar_service,
+                            email,
+                            resultado,
+                            test_mode=False,
+                            log_fn=lambda msg: _add_monitor_log(f"  {msg}"),
+                            event_fn=_add_event,
+                        )
 
                         state["ultimos_emails"].append(email["message_id"])
                         state["ultimos_emails"] = state["ultimos_emails"][-100:]
@@ -265,6 +194,31 @@ def stop_gmail_monitor():
         gmail_monitor_state["running"] = False
 
 
+def _store_correo(email: dict, resultado: dict):
+    """Almacena un email procesado en el inbox de la UI (llamar dentro de _gmail_lock)."""
+    analisis = resultado.get("analisis_email", {}) if isinstance(resultado, dict) else {}
+    clasificacion = resultado.get("clasificacion", {}) if isinstance(resultado, dict) else {}
+    resumen_corto = str(clasificacion.get("resumen", "")).strip()
+    if not resumen_corto:
+        resumen_corto = str(resultado.get("resumen", ""))[:300].strip()
+    correo_card = {
+        "id": email.get("message_id", ""),
+        "ts": datetime.now().strftime("%d/%m %H:%M"),
+        "subject": email.get("subject", "Sin asunto"),
+        "sender": email.get("sender", ""),
+        "categoria": str(clasificacion.get("categoria", "")).strip(),
+        "urgencia": str(analisis.get("urgencia", "no urgente")).strip(),
+        "justificacion": str(analisis.get("justificacion_urgencia", "")).strip(),
+        "resumen": resumen_corto,
+        "posible_respuesta": str(resultado.get("resumen", "")).strip(),
+        "acciones": analisis.get("acciones_pendientes", []) if isinstance(analisis, dict) else [],
+        "leido": False,
+    }
+    gmail_monitor_state["correos"].insert(0, correo_card)
+    gmail_monitor_state["correos"] = gmail_monitor_state["correos"][:MAX_CORREOS]
+    gmail_monitor_state["correos_sin_leer"] += 1
+
+
 # ─── Modelos de petición/respuesta ─────────────────────────────────────────
 
 class PeticionRequest(BaseModel):
@@ -283,6 +237,9 @@ class PeticionResponse(BaseModel):
     evento_fecha: str = ""
     evento_alternativas: list = []
     borrador_email: str = ""
+    # RF5: resumen de agenda
+    agenda_resumen: str = ""
+    agenda_rango: str = ""
 
 # ─── Endpoints API ─────────────────────────────────────────────────────────
 
@@ -295,7 +252,7 @@ def procesar_peticion(req: PeticionRequest):
 
     start_time = time.time()
     try:
-        from src.ejemplo1.main import SupervisorFlow
+        from src.oficinacrew.main import SupervisorFlow
 
         flow = SupervisorFlow()
         result = flow.kickoff(inputs={"peticion": peticion})
@@ -314,9 +271,16 @@ def procesar_peticion(req: PeticionRequest):
         # ── Integración Calendar para peticiones de agenda ──
         if categoria in {"agenda", "ambos"}:
             try:
-                response = _handle_calendar_from_petition(
-                    peticion, clasificacion, response
-                )
+                from gmail_monitor import has_explicit_scheduling_intent, has_agenda_summary_intent
+                # Primero comprobar si es una CONSULTA de agenda (RF5), luego si es CREACIóN (RF4)
+                # El orden importa: consultas como "¿qué citas tengo?"
+                # no deben ir por el camino de crear eventos
+                if has_agenda_summary_intent(peticion):
+                    response = _handle_agenda_summary(peticion, response)
+                elif has_explicit_scheduling_intent(peticion) or has_explicit_scheduling_intent(
+                    str(clasificacion.get("texto_agenda", ""))
+                ):
+                    response = _handle_calendar_from_petition(peticion, clasificacion, response)
             except Exception as e:
                 logger.error(f"Error en integración Calendar: {e}")
                 _add_event("error", "Error Calendar", str(e))
@@ -330,6 +294,35 @@ def procesar_peticion(req: PeticionRequest):
             error=str(e),
             duracion_segundos=elapsed,
         )
+
+
+def _handle_agenda_summary(peticion: str, response: PeticionResponse) -> PeticionResponse:
+    """RF5: Obtiene eventos de Google Calendar en el rango solicitado y genera un resumen."""
+    from gmail_monitor import (
+        get_google_services,
+        parse_date_range_for_summary,
+        find_overlapping_events,
+        build_agenda_summary_text,
+    )
+
+    reference_dt = datetime.now().astimezone()
+    start_dt, end_dt = parse_date_range_for_summary(peticion, reference_dt)
+    logger.info(f"[RF5] Resumen agenda: {start_dt.date()} → {end_dt.date()}")
+
+    _, calendar_service = get_google_services()
+    events = find_overlapping_events(calendar_service, start_dt, end_dt)
+    summary_text = build_agenda_summary_text(events, start_dt, end_dt)
+
+    response.agenda_resumen = summary_text
+    response.agenda_rango = f"{start_dt.strftime('%d/%m/%Y')} - {end_dt.strftime('%d/%m/%Y')}"
+    response.resultado = summary_text  # también en resultado para que lo muestre el flow
+
+    _add_event(
+        "email",
+        f"Resumen de agenda",
+        f"{len(events)} evento(s) entre {start_dt.strftime('%d/%m')} y {end_dt.strftime('%d/%m')}",
+    )
+    return response
 
 
 def _handle_calendar_from_petition(
@@ -348,14 +341,22 @@ def _handle_calendar_from_petition(
     if not texto_agenda:
         texto_agenda = peticion
 
+    logger.info(f"[DEBUG CALENDAR] peticion='{peticion}'")
+    logger.info(f"[DEBUG CALENDAR] texto_agenda='{texto_agenda}'")
+    logger.info(f"[DEBUG CALENDAR] has_scheduling_intent(texto_agenda)={has_explicit_scheduling_intent(texto_agenda)}")
+    logger.info(f"[DEBUG CALENDAR] has_scheduling_intent(peticion)={has_explicit_scheduling_intent(peticion)}")
+
     if not has_explicit_scheduling_intent(texto_agenda) and not has_explicit_scheduling_intent(peticion):
+        logger.info(f"[DEBUG CALENDAR] No scheduling intent detected, returning without calendar action")
         return response
 
     reference_dt = datetime.now().astimezone()
     sources = [peticion, texto_agenda]
     start_dt, end_dt = _parse_event_datetimes_from_sources(sources, reference_dt)
+    logger.info(f"[DEBUG CALENDAR] parsed start_dt={start_dt}, end_dt={end_dt}")
 
     if not start_dt or not end_dt:
+        logger.info(f"[DEBUG CALENDAR] No valid dates parsed, returning without calendar action")
         return response
 
     _, calendar_service = get_google_services()
@@ -474,6 +475,90 @@ def gmail_stop():
     """Detiene el monitor de Gmail."""
     stop_gmail_monitor()
     return {"success": True, "message": "Monitor de Gmail detenido"}
+
+
+@app.get("/api/gmail/correos")
+def gmail_correos():
+    """Devuelve el inbox de correos procesados."""
+    with _gmail_lock:
+        return {
+            "correos": gmail_monitor_state["correos"],
+            "sin_leer": gmail_monitor_state["correos_sin_leer"],
+        }
+
+
+@app.post("/api/gmail/correos/leidos")
+def gmail_marcar_leidos():
+    """Marca todos los correos como leídos y resetea el contador."""
+    with _gmail_lock:
+        gmail_monitor_state["correos_sin_leer"] = 0
+        for c in gmail_monitor_state["correos"]:
+            c["leido"] = True
+    return {"success": True}
+
+
+def _build_ui_test_cases_html() -> str:
+    """Renderiza una batería de pruebas manuales por requisito para la UI."""
+    sections = []
+    for requirement in UI_REQUIREMENT_CASES:
+        cases_html = []
+        for case in requirement.get("casos", []):
+            prompt = str(case.get("prompt", "")).strip()
+            expected = str(case.get("esperado", "")).strip()
+            cases_html.append(
+                """
+                <div class="test-case-card">
+                  <div class="test-case-prompt">{prompt}</div>
+                  <div class="test-case-actions">
+                    <button class="test-prompt-btn" data-prompt="{data_prompt}" onclick="usePrompt(this.dataset.prompt)">Usar en la UI</button>
+                  </div>
+                  <div class="test-case-expected"><strong>Esperado:</strong> {expected}</div>
+                </div>
+                """.format(
+                    prompt=html_escape(prompt),
+                    data_prompt=html_escape(prompt, quote=True),
+                    expected=html_escape(expected),
+                )
+            )
+
+        sections.append(
+            """
+            <section class="test-group">
+              <div class="test-group-header">
+                <span class="test-badge">{requisito}</span>
+                <h3>{titulo}</h3>
+              </div>
+              <p class="test-group-objective">{objetivo}</p>
+              <div class="test-case-list">{cases}</div>
+            </section>
+            """.format(
+                requisito=html_escape(str(requirement.get("requisito", ""))),
+                titulo=html_escape(str(requirement.get("titulo", ""))),
+                objetivo=html_escape(str(requirement.get("objetivo", ""))),
+                cases="".join(cases_html),
+            )
+        )
+
+    return """
+    <div class="manual-tests-launcher-wrap">
+      <button class="manual-tests-launcher" onclick="openManualTests()">Abrir pruebas por requisito</button>
+    </div>
+    <div class="manual-tests-modal" id="manual-tests-modal" aria-hidden="true">
+      <div class="manual-tests-backdrop" onclick="closeManualTests()"></div>
+      <div class="manual-tests-window" role="dialog" aria-modal="true" aria-labelledby="manual-tests-title">
+        <div class="manual-tests-window-header">
+          <div>
+            <h2 id="manual-tests-title">Pruebas por requisito</h2>
+            <p>Casos manuales para validar desde la UI los requisitos completados y revisar el estado de los parciales.</p>
+          </div>
+          <button class="manual-tests-close" onclick="closeManualTests()" aria-label="Cerrar pruebas">Cerrar</button>
+        </div>
+        <div class="manual-tests-panel">
+          <div class="test-groups">{sections}</div>
+        </div>
+      </div>
+    </div>
+    """.format(sections="".join(sections))
 
 # ─── Interfaz HTML ─────────────────────────────────────────────────────────
 
@@ -748,6 +833,167 @@ HTML_PAGE = """<!DOCTYPE html>
     transition: all 0.2s;
   }
   .example-chip:hover { border-color: #38bdf8; color: #38bdf8; }
+  .manual-tests-launcher-wrap {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 1rem;
+  }
+  .manual-tests-launcher {
+    padding: 0.55rem 0.95rem;
+    border: 1px solid #0ea5e9;
+    border-radius: 10px;
+    background: #082f49;
+    color: #e0f2fe;
+    font-size: 0.84rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .manual-tests-launcher:hover {
+    border-color: #38bdf8;
+    background: #0c4a6e;
+  }
+  .manual-tests-modal {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 1100;
+  }
+  .manual-tests-modal.open {
+    display: flex;
+  }
+  .manual-tests-backdrop {
+    position: absolute;
+    inset: 0;
+    background: rgba(2, 6, 23, 0.7);
+    backdrop-filter: blur(4px);
+  }
+  .manual-tests-window {
+    position: relative;
+    width: min(980px, calc(100vw - 2rem));
+    max-height: min(88vh, 900px);
+    overflow: hidden;
+    background: #020617;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(2, 6, 23, 0.6);
+    z-index: 1;
+  }
+  .manual-tests-window-header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: flex-start;
+    padding: 1rem 1.1rem;
+    border-bottom: 1px solid #1e293b;
+    background: #0b1220;
+  }
+  .manual-tests-window-header h2 {
+    font-size: 1rem;
+    color: #e2e8f0;
+    margin-bottom: 0.25rem;
+  }
+  .manual-tests-window-header p {
+    color: #94a3b8;
+    font-size: 0.84rem;
+  }
+  .manual-tests-close {
+    padding: 0.45rem 0.8rem;
+    border: 1px solid #475569;
+    border-radius: 8px;
+    background: transparent;
+    color: #cbd5e1;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+  .manual-tests-close:hover {
+    border-color: #94a3b8;
+    color: #f8fafc;
+  }
+  .manual-tests-panel {
+    background: #111827;
+    padding: 1rem 1.1rem;
+    max-height: calc(88vh - 84px);
+    overflow-y: auto;
+  }
+  .test-groups {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0.85rem;
+  }
+  .test-group {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    border-radius: 10px;
+    padding: 0.9rem;
+  }
+  .test-group-header {
+    display: flex;
+    gap: 0.6rem;
+    align-items: center;
+    margin-bottom: 0.45rem;
+    flex-wrap: wrap;
+  }
+  .test-group-header h3 {
+    font-size: 0.92rem;
+    color: #e2e8f0;
+  }
+  .test-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 48px;
+    padding: 0.2rem 0.45rem;
+    border-radius: 999px;
+    border: 1px solid #1d4ed8;
+    background: #0b3b84;
+    color: #dbeafe;
+    font-size: 0.72rem;
+    font-weight: 700;
+  }
+  .test-group-objective {
+    color: #94a3b8;
+    font-size: 0.82rem;
+    margin-bottom: 0.7rem;
+  }
+  .test-case-list {
+    display: grid;
+    gap: 0.6rem;
+  }
+  .test-case-card {
+    border: 1px solid #334155;
+    background: #111827;
+    border-radius: 8px;
+    padding: 0.75rem;
+  }
+  .test-case-prompt {
+    color: #e2e8f0;
+    font-size: 0.84rem;
+    margin-bottom: 0.5rem;
+    line-height: 1.45;
+  }
+  .test-case-actions {
+    margin-bottom: 0.45rem;
+  }
+  .test-prompt-btn {
+    padding: 0.35rem 0.7rem;
+    border: 1px solid #0ea5e9;
+    border-radius: 8px;
+    background: #082f49;
+    color: #e0f2fe;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .test-prompt-btn:hover {
+    border-color: #38bdf8;
+    background: #0c4a6e;
+  }
+  .test-case-expected {
+    color: #94a3b8;
+    font-size: 0.79rem;
+    line-height: 1.4;
+  }
   /* Notifications panel */
   .notif-panel {
     position: fixed;
@@ -811,7 +1057,143 @@ HTML_PAGE = """<!DOCTYPE html>
     #notif-list {
       max-height: calc(45vh - 2.2rem);
     }
+    .manual-tests-window {
+      width: calc(100vw - 1rem);
+      max-height: 92vh;
+    }
+    .manual-tests-window-header {
+      flex-direction: column;
+      align-items: stretch;
+    }
   }
+  /* ── Tabs ── */
+  .tabs-nav {
+    display: flex;
+    gap: 0.25rem;
+    border-bottom: 1px solid #334155;
+    margin-bottom: 1.25rem;
+  }
+  .tab-btn {
+    padding: 0.55rem 1.1rem;
+    border: none;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    background: transparent;
+    color: #64748b;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+  .tab-btn:hover { color: #94a3b8; }
+  .tab-btn.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+  .tab-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: #ef4444;
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+  }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  /* ── Email cards ── */
+  .correos-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 0.75rem;
+  }
+  .correos-mark-read-btn {
+    padding: 0.35rem 0.8rem;
+    border: 1px solid #334155;
+    border-radius: 6px;
+    background: transparent;
+    color: #64748b;
+    font-size: 0.78rem;
+    cursor: pointer;
+  }
+  .correos-mark-read-btn:hover { border-color: #475569; color: #94a3b8; }
+  .correos-empty {
+    text-align: center;
+    color: #475569;
+    padding: 3rem 1rem;
+    font-size: 0.9rem;
+    line-height: 1.7;
+  }
+  .correo-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 0.85rem;
+    animation: fadeIn 0.3s ease;
+  }
+  .correo-card.no-leido { border-left: 3px solid #38bdf8; }
+  .correo-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-bottom: 0.55rem;
+    flex-wrap: wrap;
+  }
+  .correo-subject { font-size: 0.95rem; font-weight: 600; color: #e2e8f0; flex: 1; }
+  .correo-sender { font-size: 0.78rem; color: #64748b; margin-top: 0.12rem; }
+  .correo-ts { font-size: 0.72rem; color: #475569; white-space: nowrap; flex-shrink: 0; }
+  .correo-badges { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-bottom: 0.55rem; }
+  .urg-urgente { background: #450a0a; color: #fca5a5; }
+  .urg-no-urgente { background: #082f49; color: #7dd3fc; }
+  .urg-trivial { background: #1c1917; color: #a8a29e; }
+  .correo-section {
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid #1e293b;
+  }
+  .correo-section-label {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #64748b;
+    margin-bottom: 0.3rem;
+  }
+  .correo-section-body {
+    font-size: 0.85rem;
+    color: #cbd5e1;
+    line-height: 1.55;
+    white-space: pre-wrap;
+  }
+  .correo-actions-list { list-style: none; padding: 0; margin: 0; }
+  .correo-actions-list li {
+    display: flex;
+    gap: 0.5rem;
+    align-items: flex-start;
+    padding: 0.25rem 0;
+    font-size: 0.83rem;
+    color: #cbd5e1;
+    line-height: 1.4;
+  }
+  .correo-actions-list li::before { content: '›'; color: #38bdf8; font-weight: 700; flex-shrink: 0; }
+  .correo-prio-alta { color: #fca5a5; font-weight: 600; }
+  .correo-prio-media { color: #fbbf24; }
+  .correo-expandable summary {
+    cursor: pointer;
+    color: #64748b;
+    font-size: 0.78rem;
+    padding: 0.25rem 0;
+    list-style: none;
+    user-select: none;
+  }
+  .correo-expandable summary:hover { color: #94a3b8; }
+  .correo-expandable[open] summary { color: #94a3b8; }
 </style>
 </head>
 <body>
@@ -838,24 +1220,48 @@ HTML_PAGE = """<!DOCTYPE html>
     <h3>Actividad del Monitor</h3>
     <div id="notif-list"></div>
   </div>
-  <div class="examples">
-    <span class="example-chip" onclick="useExample(this)">Organiza una reunión mañana a las 10</span>
-    <span class="example-chip" onclick="useExample(this)">Redacta un email al cliente sobre el retraso del proyecto</span>
-    <span class="example-chip" onclick="useExample(this)">Busca documentos sobre vacaciones</span>
-    <span class="example-chip" onclick="useExample(this)">Resume el documento politica_teletrabajo.md</span>
+
+  <!-- Tabs -->
+  <nav class="tabs-nav">
+    <button class="tab-btn active" id="tab-asistente-btn" onclick="switchTab('asistente')">Asistente</button>
+    <button class="tab-btn" id="tab-correos-btn" onclick="switchTab('correos')">
+      Correos <span class="tab-badge" id="correos-badge" style="display:none">0</span>
+    </button>
+  </nav>
+
+  <!-- Panel: Asistente -->
+  <div class="tab-panel active" id="panel-asistente">
+    <div class="examples">
+      <span class="example-chip" onclick="useExample(this)">Organiza una reunión mañana a las 10</span>
+      <span class="example-chip" onclick="useExample(this)">Redacta un email al cliente sobre el retraso del proyecto</span>
+      <span class="example-chip" onclick="useExample(this)">Busca documentos sobre vacaciones</span>
+      <span class="example-chip" onclick="useExample(this)">Resume el documento politica_teletrabajo.md</span>
+    </div>
+
+    __UI_TEST_CASES__
+
+    <div class="input-area">
+      <textarea id="peticion" placeholder="Escribe tu petición aquí..." rows="2"></textarea>
+      <button class="btn-primary" id="btn-enviar" onclick="enviar()">Enviar</button>
+    </div>
+
+    <div class="loader" id="loader">
+      <div class="spinner"></div>
+      <div>Procesando con CrewAI...</div>
+    </div>
+
+    <div id="resultados"></div>
   </div>
 
-  <div class="input-area">
-    <textarea id="peticion" placeholder="Escribe tu petición aquí..." rows="2"></textarea>
-    <button class="btn-primary" id="btn-enviar" onclick="enviar()">Enviar</button>
+  <!-- Panel: Correos -->
+  <div class="tab-panel" id="panel-correos">
+    <div class="correos-toolbar">
+      <button class="correos-mark-read-btn" onclick="marcarCorreosLeidos()">Marcar todo como leído</button>
+    </div>
+    <div id="correos-list">
+      <div class="correos-empty">No hay correos procesados aún.<br>Activa el monitor de Gmail para empezar a recibir.</div>
+    </div>
   </div>
-
-  <div class="loader" id="loader">
-    <div class="spinner"></div>
-    <div>Procesando con CrewAI...</div>
-  </div>
-
-  <div id="resultados"></div>
 </div>
 
 <script>
@@ -932,6 +1338,34 @@ function useExample(el) {
   input.focus();
 }
 
+function usePrompt(prompt) {
+  input.value = prompt;
+  closeManualTests();
+  input.focus();
+}
+
+function openManualTests() {
+  const modal = document.getElementById('manual-tests-modal');
+  if (!modal) return;
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeManualTests() {
+  const modal = document.getElementById('manual-tests-modal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    closeManualTests();
+  }
+});
+
 async function enviar() {
   const peticion = input.value.trim();
   if (!peticion) return;
@@ -966,6 +1400,9 @@ function mostrarResultado(peticion, data) {
   }
   if (data.evento_creado) {
     meta += `<span class="badge agenda">evento creado</span>`;
+  }
+  if (data.agenda_resumen) {
+    meta += `<span class="badge agenda">resumen agenda</span>`;
   }
   if (data.evento_conflicto) {
     meta += `<span class="badge" style="background:#713f12;color:#fbbf24">conflicto</span>`;
@@ -1016,10 +1453,21 @@ function mostrarResultado(peticion, data) {
       </div>`;
   }
 
+  let agendaHtml = '';
+  if (data.agenda_resumen) {
+    const hasConflict = data.agenda_resumen.includes('\u26a0');
+    agendaHtml = `
+      <div class="calendar-info ${hasConflict ? 'conflict' : 'created'}" style="margin-top:12px">
+        <h4>Resumen de agenda${data.agenda_rango ? ' (' + escapeHtml(data.agenda_rango) + ')' : ''}</h4>
+        <pre style="white-space:pre-wrap;font-size:0.88rem;margin:8px 0 0">${escapeHtml(data.agenda_resumen)}</pre>
+      </div>`;
+  }
+
   card.innerHTML = `
     <div class="meta">${meta}</div>
     <div class="result-text"><strong>Petición:</strong> ${escapeHtml(peticion)}\\n\\n${escapeHtml(body)}</div>
     ${calendarHtml}
+    ${agendaHtml}
     ${draftHtml}
   `;
 
@@ -1072,9 +1520,113 @@ function renderEvents(events) {
     </div>
   `).join('');
 }
+
+// ── Correos Tab ──
+let lastCorreosCount = -1;
+
+async function fetchCorreos() {
+  try {
+    const r = await fetch('/api/gmail/correos');
+    const d = await r.json();
+    const correos = d.correos || [];
+    const sinLeer = d.sin_leer || 0;
+
+    // Badge en la pestaña
+    const badge = document.getElementById('correos-badge');
+    if (sinLeer > 0) {
+      badge.textContent = sinLeer;
+      badge.style.display = 'inline-flex';
+    } else {
+      badge.style.display = 'none';
+    }
+
+    // Solo re-renderizar si hay cambios
+    if (correos.length === lastCorreosCount) return;
+    lastCorreosCount = correos.length;
+    renderCorreos(correos);
+  } catch(e) {}
+}
+
+function renderCorreos(correos) {
+  const list = document.getElementById('correos-list');
+  if (!correos.length) {
+    list.innerHTML = '<div class="correos-empty">No hay correos procesados a\\u00fan.<br>Activa el monitor de Gmail para empezar a recibir.</div>';
+    return;
+  }
+  list.innerHTML = correos.map(c => renderCorreoCard(c)).join('');
+}
+
+function renderCorreoCard(c) {
+  const urgClass = c.urgencia === 'urgente' ? 'urg-urgente' : (c.urgencia === 'trivial' ? 'urg-trivial' : 'urg-no-urgente');
+  const noLeidoClass = c.leido ? '' : ' no-leido';
+
+  let accionesHtml = '';
+  if (c.acciones && c.acciones.length) {
+    const items = c.acciones.map(a => {
+      const prioClass = a.prioridad === 'alta' ? 'correo-prio-alta' : (a.prioridad === 'media' ? 'correo-prio-media' : '');
+      return `<li>${escapeHtml(a.accion || '')}${a.fecha_limite ? ` <span style="color:#64748b">\\u00b7 ${escapeHtml(a.fecha_limite)}</span>` : ''} <span class="${prioClass}">[${escapeHtml(a.prioridad || 'media')}]</span></li>`;
+    }).join('');
+    accionesHtml = `
+      <div class="correo-section">
+        <div class="correo-section-label">Acciones pendientes (${c.acciones.length})</div>
+        <ul class="correo-actions-list">${items}</ul>
+      </div>`;
+  }
+
+  let respuestaHtml = '';
+  if (c.posible_respuesta && c.posible_respuesta.length > 10) {
+    respuestaHtml = `
+      <div class="correo-section">
+        <details class="correo-expandable">
+          <summary>Ver posible respuesta \\u2192</summary>
+          <div class="correo-section-body" style="margin-top:0.4rem">${escapeHtml(c.posible_respuesta)}</div>
+        </details>
+      </div>`;
+  }
+
+  return `
+    <div class="correo-card${noLeidoClass}">
+      <div class="correo-card-header">
+        <div style="flex:1;min-width:0">
+          <div class="correo-subject">${escapeHtml(c.subject)}</div>
+          <div class="correo-sender">${escapeHtml(c.sender)}</div>
+        </div>
+        <span class="correo-ts">${c.ts}</span>
+      </div>
+      <div class="correo-badges">
+        ${c.categoria ? `<span class="badge ${escapeHtml(c.categoria)}">${escapeHtml(c.categoria)}</span>` : ''}
+        <span class="badge ${urgClass}">${escapeHtml(c.urgencia)}</span>
+      </div>
+      ${c.resumen ? `<div class="correo-section"><div class="correo-section-label">Resumen</div><div class="correo-section-body">${escapeHtml(c.resumen)}</div></div>` : ''}
+      ${accionesHtml}
+      ${respuestaHtml}
+    </div>`;
+}
+
+async function marcarCorreosLeidos() {
+  try {
+    await fetch('/api/gmail/correos/leidos', { method: 'POST' });
+    const badge = document.getElementById('correos-badge');
+    badge.style.display = 'none';
+    lastCorreosCount = -1;  // Forzar re-render para marcar cards como leídas
+    fetchCorreos();
+  } catch(e) {}
+}
+
+function switchTab(tab) {
+  ['asistente', 'correos'].forEach(t => {
+    document.getElementById(`panel-${t}`).classList.toggle('active', t === tab);
+    document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === tab);
+  });
+  if (tab === 'correos') marcarCorreosLeidos();
+}
+
+// Poll correos cada 10s
+fetchCorreos();
+setInterval(fetchCorreos, 10000);
 </script>
 </body>
-</html>"""
+</html>""".replace("__UI_TEST_CASES__", _build_ui_test_cases_html())
 
 
 @app.get("/", response_class=HTMLResponse)

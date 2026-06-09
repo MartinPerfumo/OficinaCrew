@@ -1,5 +1,5 @@
 [project]
-name = "ejemplo1"
+name = "oficinacrew"
 version = "0.1.0"
 description = "Sistema multi-agente con supervisor Flow que enruta peticiones a agentes especializados"
 authors = [{ name = "Martin", email = "martin@example.com" }]
@@ -19,11 +19,11 @@ dependencies = [
 ]
 
 [project.scripts]
-kickoff = "ejemplo1.main:kickoff"
-run_crew = "ejemplo1.main:kickoff"
-plot = "ejemplo1.main:plot"
-run_with_trigger = "ejemplo1.main:run_with_trigger"
-ejemplo1 = "ejemplo1.main:run"
+kickoff = "oficinacrew.main:kickoff"
+run_crew = "oficinacrew.main:kickoff"
+plot = "oficinacrew.main:plot"
+run_with_trigger = "oficinacrew.main:run_with_trigger"
+oficinacrew = "oficinacrew.main:run"
 
 [build-system]
 requires = ["hatchling"]
@@ -31,3 +31,8 @@ build-backend = "hatchling.build"
 
 [tool.crewai]
 type = "flow"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]

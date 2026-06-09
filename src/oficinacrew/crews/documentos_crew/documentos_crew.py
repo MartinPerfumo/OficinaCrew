@@ -3,7 +3,7 @@ import os
 from crewai import Agent, Crew, Process, Task, LLM
 from crewai.project import CrewBase, agent, crew, task
 
-from ejemplo1.crews.documentos_crew.documentos_tools import (
+from oficinacrew.crews.documentos_crew.documentos_tools import (
     buscar_documentos,
     leer_documento,
     extraer_seccion,
