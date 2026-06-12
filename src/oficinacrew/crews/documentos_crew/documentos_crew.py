@@ -8,6 +8,7 @@ from oficinacrew.crews.documentos_crew.documentos_tools import (
     leer_documento,
     extraer_seccion,
     comparar_documentos,
+    buscar_respuesta_en_documento,
 )
 
 # Modelo configurable para reducir fallos por rate limit en producción.
@@ -31,6 +32,7 @@ class DocumentosCrew:
                 leer_documento,
                 extraer_seccion,
                 comparar_documentos,
+                buscar_respuesta_en_documento,
             ],
             verbose=True,
             max_iter=15,

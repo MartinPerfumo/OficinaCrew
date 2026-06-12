@@ -94,12 +94,21 @@ def _find_best_document_candidate(peticion: str) -> Path | None:
     if not tokens:
         return files[0]
 
+    def _token_matches(token: str, text: str) -> bool:
+        """True si el token o un prefijo suyo de ≥5 chars aparece en el texto."""
+        if token in text:
+            return True
+        # Comparación por prefijo común para cubrir formas verbales/flexionadas
+        # ej: "teletrabajar" vs "teletrabajo" → prefijo común "teletrabaj" (10 chars)
+        prefix_len = min(len(token), len(text), max(5, len(token) - 2))
+        return token[:prefix_len] in text
+
     def score(path: Path) -> tuple[int, int, int]:
         name = path.name.lower()
         stem = path.stem.lower()
-        token_hits = sum(1 for t in tokens if t in name)
+        token_hits = sum(1 for t in tokens if _token_matches(t, name))
         exact_hint = int(hint in name or hint in stem)
-        stem_hits = sum(1 for t in tokens if t in stem)
+        stem_hits = sum(1 for t in tokens if _token_matches(t, stem))
         return (exact_hint, token_hits, stem_hits)
 
     ranked = sorted(files, key=score, reverse=True)
@@ -472,6 +481,28 @@ Responde SOLO con el JSON, sin texto adicional."""
                 text_for_rules,
             )
         )
+        # Pregunta factual sobre política/normativa interna (RF8): "¿Puedo teletrabajar...?",
+        # "¿Está permitido...?", "¿Qué dice la política de...?", etc. → documentos
+        # Usamos stems (teletraba-, vacacion-) para cubrir todas las formas verbales/nominales.
+        has_policy_question_intent = bool(
+            re.search(
+                r"[¿?]|"
+                r"\b(puedo|puede|pueden|se puede|permitido|permitida|est[aá] permitid|autorizado|autorizada|"
+                r"establece|dice|indica|contempla|recoge|estipula|aplica|afecta|computa|cuenta|contabiliza)\b",
+                text_for_rules,
+            )
+            and re.search(
+                r"teletraba|vacacion|ausencia|baja\s+m[eé]dic|permiso|pol[ií]tic|normativ|reglament|"
+                r"procedimiento|protocolo|convenio|jornada|salario|sueldo|beneficio|auditoria|auditor[ií]|"
+                r"cierre\s+fiscal|incorporaci[oó]n|periodo\s+bloqueado",
+                text_for_rules,
+            )
+            and not re.search(
+                r"\b(redacta|redactar|escribe|escribir|prepara|preparar|enviar|envia|mandar|manda)\b.*\b(email|correo|mensaje)\b|"
+                r"\b(email|correo|mensaje)\b.*\b(redacta|escribe|prepara|enviar|mandar)\b",
+                text_for_rules,
+            )
+        )
         has_document_intent = bool(
             re.search(
                 r"\b(documento|documentos|informe|adjunto|adjuntar|presentar|expediente|contrato|buscar|busca|buscarlos|b[uú]scalos|localizar|encuentra)\b",
@@ -480,7 +511,7 @@ Responde SOLO con el JSON, sin texto adicional."""
         ) or bool(
             re.search(r"\b(resumen|resumir|sintetiza|síntesis|describe|describir|explica)\b", text_for_rules)
             and re.search(r"\b(empresa|compa[nñ]i[aí]a|compania|negocio|firma|organización|organizacion)\b", text_for_rules)
-        )
+        ) or has_policy_question_intent
         asks_to_write = bool(
             re.search(
                 r"\b(redacta|redactar|escribe|escribir|prepara|preparar|redacción|redaccion|enviar|envia|envía|mandar|manda|remitir|remite)\b"

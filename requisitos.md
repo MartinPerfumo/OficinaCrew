@@ -49,9 +49,8 @@ El sistema debe generar resúmenes de documentos con una extensión de entre
 150 y 300 palabras, identificando las secciones o temas principales tratados.
 Asimismo, se extraerá la información clave del documento, incluyendo su propósito,
 los hallazgos principales y las conclusiones. (En revisión)
-### RF8: Extracción de información específica (En valoración aún)
+### RF8: Extracción de información específica ✅ COMPLETADO
 Este requisito, contempla la capacidad del sistema para responder preguntas
 concretas sobre el contenido de un documento. El sistema citaría las secciones
 relevantes del documento de origen que respaldan cada respuesta e indicaría de
 forma explícita cuando la información solicitada no se encuentra en el documento.
-(En valoración)

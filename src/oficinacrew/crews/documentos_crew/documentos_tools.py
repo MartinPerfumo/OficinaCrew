@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 from difflib import unified_diff
 
@@ -61,7 +62,7 @@ def buscar_documentos(palabras_clave: str) -> str:
     if not results:
         return "No se encontraron documentos con esas palabras clave."
     results.sort(key=lambda x: x[2], reverse=True)
-    top = results[:5]
+    top = results[:2]
     return "Documentos encontrados (ordenados por relevancia):\n" + "\n".join(
         f"  - {name}  (coincidencias: {hits})" for name, hits, _ in top
     )
@@ -173,3 +174,93 @@ def comparar_documentos(documento_a: str, documento_b: str) -> str:
     if len(output) > 4000:
         output = output[:4000] + "\n... (diff truncado por longitud)"
     return output
+
+
+# ─── Tool 5: Responder pregunta concreta con cita de fuente (RF8) ────────────
+
+@tool("buscar_respuesta_en_documento")
+def buscar_respuesta_en_documento(nombre_documento: str, pregunta: str) -> str:
+    """Busca la respuesta a una pregunta concreta dentro de un documento y devuelve
+    los fragmentos más relevantes con el encabezado de sección de origen, listos
+    para citar. Indica explícitamente si la información no está en el documento.
+
+    Args:
+        nombre_documento: Nombre del archivo a consultar (con extensión, ej: politica_vacaciones.md)
+        pregunta: Pregunta concreta cuya respuesta se quiere encontrar en el documento
+
+    Returns:
+        Fragmentos relevantes con encabezado de sección para citar, o mensaje explícito
+        si la información solicitada no se encuentra en el documento.
+    """
+    candidates = list(DOCS_DIR.glob(f"**/{nombre_documento}"))
+    if not candidates:
+        return f"Documento '{nombre_documento}' no encontrado en {DOCS_DIR}."
+
+    try:
+        content = _read_content(candidates[0])
+    except Exception as e:
+        return f"Error al leer el documento: {e}"
+
+    if len(content) > MAX_CHARS:
+        content = content[:MAX_CHARS]
+
+    # ── Dividir el documento en secciones por encabezados ────────────────────
+    sections: list[tuple[str, str]] = []  # (encabezado, contenido)
+    current_heading = "(inicio del documento)"
+    current_lines: list[str] = []
+
+    for line in content.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            if current_lines:
+                sections.append((current_heading, "\n".join(current_lines).strip()))
+            current_heading = stripped.lstrip("#").strip()
+            current_lines = []
+        else:
+            current_lines.append(line)
+    if current_lines:
+        sections.append((current_heading, "\n".join(current_lines).strip()))
+
+    # ── Puntuar secciones por solapamiento con la pregunta ───────────────────
+    pregunta_tokens = [
+        t.lower() for t in re.findall(r"[a-záéíóúüñA-ZÁÉÍÓÚÜÑ0-9]+", pregunta)
+        if len(t) > 2
+    ]
+    stop_tokens = {"qué", "que", "cuál", "cual", "cómo", "como", "cuándo",
+                   "cuando", "dónde", "donde", "por", "para", "los", "las",
+                   "del", "una", "uno", "son", "hay", "tiene", "hay"}
+    pregunta_tokens = [t for t in pregunta_tokens if t not in stop_tokens]
+
+    scored: list[tuple[int, str, str]] = []
+    for heading, body in sections:
+        if not body.strip():
+            continue
+        combined = (heading + " " + body).lower()
+        score = sum(combined.count(tok) for tok in pregunta_tokens)
+        if score > 0:
+            scored.append((score, heading, body))
+
+    if not scored:
+        return (
+            f"La información sobre \"{pregunta}\" no se encuentra en el documento "
+            f"'{nombre_documento}'. El documento no contiene términos relacionados "
+            f"con la pregunta."
+        )
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    top = scored[:3]
+
+    # ── Construir respuesta con fragmentos citados ───────────────────────────
+    bloques: list[str] = []
+    for _, heading, body in top:
+        # Truncar fragmento a 600 chars para no sobrepasar contexto
+        fragmento = body[:600].rstrip()
+        if len(body) > 600:
+            fragmento += "..."
+        bloques.append(f"**Sección: \"{heading}\"**\n{fragmento}")
+
+    header = (
+        f"Fragmentos más relevantes de '{nombre_documento}' "
+        f"para la pregunta: \"{pregunta}\"\n\n"
+    )
+    return header + "\n\n---\n\n".join(bloques)
