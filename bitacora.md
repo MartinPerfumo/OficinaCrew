@@ -109,3 +109,93 @@
   - Sección **Acciones pendientes** con prioridad y fecha límite (si las hay).
   - Sección **Posible respuesta** colapsable (expandir con clic).
 - El panel de correos se refresca automáticamente cada 10 segundos.
+
+## 2026-06-30
+
+### Implementación RF8: Q&A con cita de fragmentos documentales
+- Nueva herramienta `buscar_respuesta_en_documento` en `documentos_tools.py`:
+  - Divide el documento por cabeceras `#` en secciones y puntúa por solapamiento de tokens con la pregunta.
+  - Devuelve los 3 fragmentos más relevantes con su sección de origen para citar.
+  - Si no hay coincidencias, responde explícitamente "no encontrado".
+- Actualizado `tasks.yaml` del crew de documentos con formato de cita: `> "fragmento" — archivo, sección "nombre"`.
+- Añadido `buscar_respuesta_en_documento` a la lista de tools del agente de documentos.
+- `max_iter` del agente de documentos aumentado a 15.
+- RF8 marcado como ✅ COMPLETADO en `requisitos.md`.
+
+### Corrección: selección de documento erróneo (teletrabajo vs. vacaciones)
+- Reducidos resultados de `buscar_documentos` de 5 a 2 para evitar que el agente cargue el documento secundario.
+- Añadida instrucción explícita en `tasks.yaml` paso 1: incluir la palabra clave del tema en la búsqueda.
+
+### Corrección: routing de preguntas sobre política interna
+- Añadida función `has_policy_question_intent` en `main.py` con stems (`teletraba`, `vacacion`, `auditoria`…).
+- Las preguntas factuales sobre normativa se fuerzan a categoría `documentos` aunque no mencionen la palabra "documento".
+
+### Corrección: detección de formas verbales en búsqueda documental
+- Función `_token_matches` con prefijo (mínimo 5 chars o longitud−2) en `_find_best_document_candidate`.
+- "teletrabajar" → empareja con "teletrabajo"; resuelve el "no encontré documento" para formas verbales.
+
+### Pestaña "Tareas Pendientes"
+- Nueva pestaña "Tareas" en la UI con badge naranja de contador.
+- Estado `tareas` + `tareas_contador` en `gmail_monitor_state`; constante `MAX_TAREAS = 100`.
+- Función `_store_correo` ampliada: extrae acciones del análisis RF3 y las inserta como tareas.
+- Función `_ordenar_tareas`: las tareas con fecha límite aparecen primero (orden cronológico); las sin fecha van al final.
+- Nuevos endpoints REST:
+  - `GET /api/tareas` – lista de tareas (pendientes y completadas).
+  - `POST /api/tareas/{id}/completar` – marca una tarea como completada.
+  - `POST /api/tareas/{id}/reabrir` – reactiva una tarea completada.
+  - `DELETE /api/tareas/{id}` – elimina una tarea.
+- Cada tarea muestra: descripción, prioridad, urgencia (badge), fecha límite con alerta de vencimiento, correo de origen.
+
+### Limpieza de código
+- Eliminados imports no utilizados: `json`, `JSONResponse`, `from pydantic import BaseModel`, comentario de ContentCrew.
+
+### Corrección: UnicodeEncodeError 500 en `GET /`
+- El emoji 📧 en la plantilla HTML estaba almacenado como par surrogate UTF-16 (`\ud83d\udce7`).
+- Reemplazado por entidad HTML `&#x1F4E7;` en la línea JS de `renderTarea`.
+
+### Corrección: fechas límite en tareas
+- Prompt de análisis RF1/RF3 actualizado: `fecha_limite` se pide siempre en formato absoluto `DD/MM/YYYY HH:MM`.
+- Se inyecta la fecha de hoy en el prompt para que el LLM resuelva fechas relativas ("mañana", "el viernes").
+- Si no se menciona hora en el correo, se usa **17:30** por defecto.
+
+### Corrección: clasificación de urgencia sobreestimada
+- Se eliminó la condición `prioridad == "alta"` como criterio de urgencia en tareas.
+- Prompt actualizado: urgencia solo para palabras explícitas (`urgente`, `ASAP`, `bloqueante`, `crítico`, `emergencia`). Una cita para mañana NO es urgente.
+
+### Corrección: tareas de citas no deben aparecer en el panel Tareas
+- Filtro `has_explicit_scheduling_intent` aplicado antes de insertar en `gmail_monitor_state["tareas"]`.
+
+### Corrección: título de evento de calendario incluía verbo de acción
+- `create_calendar_event_from_text` limpia el asunto con `re.sub` eliminando verbos iniciales (`Organizar`, `Agendar`, `Programar`, etc.) antes de usarlo como `summary` del evento.
+- Ejemplo: "Organizar CITA DEVOPS" → "CITA DEVOPS".
+
+### Fase 1 del ROADMAP — Corrección de fallos funcionales
+- **RF3 enrutamiento**: peticiones del tipo "¿qué tareas tengo pendientes?" eran enrutadas al agente de documentos.
+  - Nueva función `has_task_query_intent` en `gmail_monitor.py`.
+  - Interceptor en `procesar_peticion` (web_server.py): si se detecta intent de tareas, responde directamente desde `gmail_monitor_state` sin invocar `SupervisorFlow`.
+  - Nueva función `_handle_task_query` que formatea las tareas pendientes en Markdown.
+- **Pipeline correo → tarea (RF3)**:
+  - El contador `tareas_contador` solo se incrementa cuando la tarea pasa todos los filtros (antes se incrementaba aunque se descartara).
+  - Validación de `fecha_limite`: solo se acepta si coincide exactamente con `DD/MM/YYYY HH:MM`; cualquier texto libre se descarta (`None`).
+
+### Fase 2.1 del ROADMAP — Batería de pruebas con ground truth
+- Creado `evaluation/test_cases.json`: 20 casos de prueba estructurados con campo `esperado` para comparación automática.
+  - Bloques: RF1_urgencia (4), RF3_tareas (3), clasificacion_peticion (6), RF6 (2), RF7 (2), RF8 (3).
+  - Incluye casos de regresión: cita no debe ser urgente, cita no debe generar tarea, "tareas pendientes" no debe ir a documentos.
+- Creado `evaluation/benchmark.py`: script de ejecución automática con:
+  - Ejecutores por bloque que llaman al sistema real (no mocks).
+  - Métricas por bloque: accuracy %, tiempo medio de respuesta.
+  - Guardado de resultados en `evaluation/results.json` con timestamp para comparar versiones.
+  - Parámetros `--bloque` y `--id` para ejecuciones parciales.
+- Creado `ROADMAP.md` con hoja de ruta en 4 fases basada en el feedback del tutor del TFM.
+
+### Análisis de resultados del benchmark (primera ejecución)
+- Resultado global: 11/20 (55%) — RF1 y RF3 al 100%; fallos en clasificación y documentos.
+- **Falso positivo en `has_task_query_intent`**: "solicitando los días de vacaciones pendientes" activaba el interceptor de tareas por la palabra `pendientes` suelta, clasificando "comunicacion" como "tareas".
+  - Fix: reescrita la función con patrones directos (`mis tareas`, `tareas pendientes`, `qué tengo pendiente`…) y exclusión explícita de contextos de redacción/documentos/normativa.
+- **`ambos` degradado a `agenda`** (TC-CLAS-04): "envíale un correo de confirmación" no activaba `asks_to_write` porque el verbo `envíale` no estaba en el patrón.
+  - Fix: añadidos `envíale`, `envíaselo`, `mándale` al regex de `asks_to_write` en `main.py`.
+- **7/9 fallos por rate limit de Groq** (llama-3.1-8b-instant, 6000 TPM): el benchmark ejecutaba casos demasiado seguidos.
+  - Fix: añadida pausa de 5 segundos entre casos que invocan LLM en `benchmark.py`.
+- Creado `evaluation/validate_intent.py` como script auxiliar de regresión para `has_task_query_intent` (8 casos, todos OK tras el fix).
+

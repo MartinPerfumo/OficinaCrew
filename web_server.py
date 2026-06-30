@@ -10,7 +10,6 @@ Uso:
 import argparse
 from html import escape as html_escape
 import io
-import json
 import logging
 import os
 import sys
@@ -28,10 +27,8 @@ os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
-
-from ui_test_cases import UI_REQUIREMENT_CASES
 
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
@@ -53,6 +50,8 @@ gmail_monitor_state = {
     "events": [],        # notificaciones de la UI (confirmaciones, conflictos, etc.)
     "correos": [],       # inbox de correos procesados para la pestaña Correos
     "correos_sin_leer": 0,
+    "tareas": [],        # tareas pendientes extraídas de correos
+    "tareas_contador": 0,  # contador incremental para IDs de tareas
 }
 _gmail_lock = threading.Lock()
 _gmail_stop_event = threading.Event()
@@ -60,6 +59,7 @@ _gmail_stop_event = threading.Event()
 MAX_MONITOR_LOGS = 50
 MAX_EVENTS = 30
 MAX_CORREOS = 50
+MAX_TAREAS = 100
 
 
 def _add_monitor_log(msg: str):
@@ -201,22 +201,57 @@ def _store_correo(email: dict, resultado: dict):
     resumen_corto = str(clasificacion.get("resumen", "")).strip()
     if not resumen_corto:
         resumen_corto = str(resultado.get("resumen", ""))[:300].strip()
+    
+    email_subject = email.get("subject", "Sin asunto")
+    email_urgencia = str(analisis.get("urgencia", "no urgente")).strip().lower()
+    acciones = analisis.get("acciones_pendientes", []) if isinstance(analisis, dict) else []
+    
     correo_card = {
         "id": email.get("message_id", ""),
         "ts": datetime.now().strftime("%d/%m %H:%M"),
-        "subject": email.get("subject", "Sin asunto"),
+        "subject": email_subject,
         "sender": email.get("sender", ""),
         "categoria": str(clasificacion.get("categoria", "")).strip(),
-        "urgencia": str(analisis.get("urgencia", "no urgente")).strip(),
+        "urgencia": email_urgencia,
         "justificacion": str(analisis.get("justificacion_urgencia", "")).strip(),
         "resumen": resumen_corto,
         "posible_respuesta": str(resultado.get("resumen", "")).strip(),
-        "acciones": analisis.get("acciones_pendientes", []) if isinstance(analisis, dict) else [],
+        "acciones": acciones,
         "leido": False,
     }
     gmail_monitor_state["correos"].insert(0, correo_card)
     gmail_monitor_state["correos"] = gmail_monitor_state["correos"][:MAX_CORREOS]
     gmail_monitor_state["correos_sin_leer"] += 1
+    
+    # Extraer tareas pendientes y añadirlas a la lista global
+    from gmail_monitor import has_explicit_scheduling_intent
+    import re as _re
+    _fecha_fmt = _re.compile(r"^\d{2}/\d{2}/\d{4} \d{2}:\d{2}$")
+    for accion in acciones:
+        if not isinstance(accion, dict):
+            continue
+        descripcion = str(accion.get("accion", "")).strip()
+        if not descripcion or has_explicit_scheduling_intent(descripcion):
+            continue
+        fecha_raw = str(accion.get("fecha_limite", "")).strip()
+        fecha_limite = fecha_raw if _fecha_fmt.match(fecha_raw) else None
+        gmail_monitor_state["tareas_contador"] += 1
+        tarea = {
+            "id": gmail_monitor_state["tareas_contador"],
+            "descripcion": descripcion,
+            "fecha_limite": fecha_limite,
+            "prioridad": str(accion.get("prioridad", "media")).strip().lower(),
+            "urgencia": "urgente" if email_urgencia == "urgente" else "no urgente",
+            "email_origen": email_subject,
+            "email_id": email.get("message_id", ""),
+            "completada": False,
+            "ts": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        }
+        gmail_monitor_state["tareas"].insert(0, tarea)
+    
+    # Limitar tareas y ordenar por fecha límite (las que tienen fecha primero)
+    gmail_monitor_state["tareas"] = gmail_monitor_state["tareas"][:MAX_TAREAS]
+    _ordenar_tareas()
 
 
 # ─── Modelos de petición/respuesta ─────────────────────────────────────────
@@ -252,6 +287,11 @@ def procesar_peticion(req: PeticionRequest):
 
     start_time = time.time()
     try:
+        # ── Interceptar consultas sobre tareas pendientes ──────────────────
+        from gmail_monitor import has_task_query_intent
+        if has_task_query_intent(peticion):
+            return _handle_task_query(peticion, start_time)
+
         from src.oficinacrew.main import SupervisorFlow
 
         flow = SupervisorFlow()
@@ -294,6 +334,39 @@ def procesar_peticion(req: PeticionRequest):
             error=str(e),
             duracion_segundos=elapsed,
         )
+
+
+def _handle_task_query(peticion: str, start_time: float) -> PeticionResponse:
+    """Responde directamente desde gmail_monitor_state sin invocar el flow."""
+    tareas = gmail_monitor_state.get("tareas", [])
+    pendientes = [t for t in tareas if not t.get("completada")]
+    completadas = [t for t in tareas if t.get("completada")]
+
+    if not tareas:
+        texto = "No hay tareas registradas en este momento."
+    elif not pendientes:
+        texto = f"Todas las tareas están completadas ({len(completadas)} en total). No hay nada pendiente."
+    else:
+        lineas = [f"Tienes **{len(pendientes)}** tarea(s) pendiente(s):\n"]
+        for t in pendientes:
+            prioridad = t.get("prioridad", "media")
+            fecha = t.get("fecha_limite") or ""
+            fecha_txt = f" — límite: {fecha}" if fecha else ""
+            origen = t.get("email_origen") or ""
+            origen_txt = f" _(de: {origen})_" if origen else ""
+            lineas.append(f"- [{prioridad.upper()}] {t.get('descripcion', '')}{fecha_txt}{origen_txt}")
+        if completadas:
+            lineas.append(f"\n_{len(completadas)} tarea(s) ya completada(s)._")
+        texto = "\n".join(lineas)
+
+    elapsed = round(time.time() - start_time, 2)
+    return PeticionResponse(
+        success=True,
+        categoria="tareas",
+        resultado=texto,
+        resumen=f"{len(pendientes)} tarea(s) pendiente(s)",
+        duracion_segundos=elapsed,
+    )
 
 
 def _handle_agenda_summary(peticion: str, response: PeticionResponse) -> PeticionResponse:
@@ -497,68 +570,69 @@ def gmail_marcar_leidos():
     return {"success": True}
 
 
-def _build_ui_test_cases_html() -> str:
-    """Renderiza una batería de pruebas manuales por requisito para la UI."""
-    sections = []
-    for requirement in UI_REQUIREMENT_CASES:
-        cases_html = []
-        for case in requirement.get("casos", []):
-            prompt = str(case.get("prompt", "")).strip()
-            expected = str(case.get("esperado", "")).strip()
-            cases_html.append(
-                """
-                <div class="test-case-card">
-                  <div class="test-case-prompt">{prompt}</div>
-                  <div class="test-case-actions">
-                    <button class="test-prompt-btn" data-prompt="{data_prompt}" onclick="usePrompt(this.dataset.prompt)">Usar en la UI</button>
-                  </div>
-                  <div class="test-case-expected"><strong>Esperado:</strong> {expected}</div>
-                </div>
-                """.format(
-                    prompt=html_escape(prompt),
-                    data_prompt=html_escape(prompt, quote=True),
-                    expected=html_escape(expected),
-                )
-            )
+# ─── Tareas pendientes ─────────────────────────────────────────────────────
 
-        sections.append(
-            """
-            <section class="test-group">
-              <div class="test-group-header">
-                <span class="test-badge">{requisito}</span>
-                <h3>{titulo}</h3>
-              </div>
-              <p class="test-group-objective">{objetivo}</p>
-              <div class="test-case-list">{cases}</div>
-            </section>
-            """.format(
-                requisito=html_escape(str(requirement.get("requisito", ""))),
-                titulo=html_escape(str(requirement.get("titulo", ""))),
-                objetivo=html_escape(str(requirement.get("objetivo", ""))),
-                cases="".join(cases_html),
-            )
-        )
+def _ordenar_tareas():
+    """Ordena tareas: no completadas primero, luego por fecha límite (más próximas arriba)."""
+    def sort_key(t):
+        # Completadas van al final
+        completada = 1 if t.get("completada") else 0
+        # Urgentes primero dentro de no completadas
+        urgencia = 0 if t.get("urgencia") == "urgente" else 1
+        # Por fecha límite (None va al final)
+        fecha = t.get("fecha_limite") or "9999-99-99"
+        return (completada, urgencia, fecha)
+    gmail_monitor_state["tareas"].sort(key=sort_key)
 
-    return """
-    <div class="manual-tests-launcher-wrap">
-      <button class="manual-tests-launcher" onclick="openManualTests()">Abrir pruebas por requisito</button>
-    </div>
-    <div class="manual-tests-modal" id="manual-tests-modal" aria-hidden="true">
-      <div class="manual-tests-backdrop" onclick="closeManualTests()"></div>
-      <div class="manual-tests-window" role="dialog" aria-modal="true" aria-labelledby="manual-tests-title">
-        <div class="manual-tests-window-header">
-          <div>
-            <h2 id="manual-tests-title">Pruebas por requisito</h2>
-            <p>Casos manuales para validar desde la UI los requisitos completados y revisar el estado de los parciales.</p>
-          </div>
-          <button class="manual-tests-close" onclick="closeManualTests()" aria-label="Cerrar pruebas">Cerrar</button>
-        </div>
-        <div class="manual-tests-panel">
-          <div class="test-groups">{sections}</div>
-        </div>
-      </div>
-    </div>
-    """.format(sections="".join(sections))
+
+@app.get("/api/tareas")
+def get_tareas():
+    """Devuelve la lista de tareas pendientes."""
+    with _gmail_lock:
+        pendientes = [t for t in gmail_monitor_state["tareas"] if not t.get("completada")]
+        completadas = [t for t in gmail_monitor_state["tareas"] if t.get("completada")]
+        return {
+            "tareas": gmail_monitor_state["tareas"],
+            "pendientes": len(pendientes),
+            "completadas": len(completadas),
+        }
+
+
+@app.post("/api/tareas/{tarea_id}/completar")
+def completar_tarea(tarea_id: int):
+    """Marca una tarea como completada."""
+    with _gmail_lock:
+        for t in gmail_monitor_state["tareas"]:
+            if t["id"] == tarea_id:
+                t["completada"] = True
+                t["fecha_completada"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+                _ordenar_tareas()
+                return {"success": True}
+    return {"success": False, "error": "Tarea no encontrada"}
+
+
+@app.post("/api/tareas/{tarea_id}/reabrir")
+def reabrir_tarea(tarea_id: int):
+    """Reabre una tarea completada."""
+    with _gmail_lock:
+        for t in gmail_monitor_state["tareas"]:
+            if t["id"] == tarea_id:
+                t["completada"] = False
+                t.pop("fecha_completada", None)
+                _ordenar_tareas()
+                return {"success": True}
+    return {"success": False, "error": "Tarea no encontrada"}
+
+
+@app.delete("/api/tareas/{tarea_id}")
+def eliminar_tarea(tarea_id: int):
+    """Elimina una tarea de la lista."""
+    with _gmail_lock:
+        gmail_monitor_state["tareas"] = [
+            t for t in gmail_monitor_state["tareas"] if t["id"] != tarea_id
+        ]
+    return {"success": True}
+
 
 # ─── Interfaz HTML ─────────────────────────────────────────────────────────
 
@@ -833,167 +907,6 @@ HTML_PAGE = """<!DOCTYPE html>
     transition: all 0.2s;
   }
   .example-chip:hover { border-color: #38bdf8; color: #38bdf8; }
-  .manual-tests-launcher-wrap {
-    display: flex;
-    justify-content: flex-end;
-    margin-bottom: 1rem;
-  }
-  .manual-tests-launcher {
-    padding: 0.55rem 0.95rem;
-    border: 1px solid #0ea5e9;
-    border-radius: 10px;
-    background: #082f49;
-    color: #e0f2fe;
-    font-size: 0.84rem;
-    font-weight: 600;
-    cursor: pointer;
-  }
-  .manual-tests-launcher:hover {
-    border-color: #38bdf8;
-    background: #0c4a6e;
-  }
-  .manual-tests-modal {
-    position: fixed;
-    inset: 0;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    z-index: 1100;
-  }
-  .manual-tests-modal.open {
-    display: flex;
-  }
-  .manual-tests-backdrop {
-    position: absolute;
-    inset: 0;
-    background: rgba(2, 6, 23, 0.7);
-    backdrop-filter: blur(4px);
-  }
-  .manual-tests-window {
-    position: relative;
-    width: min(980px, calc(100vw - 2rem));
-    max-height: min(88vh, 900px);
-    overflow: hidden;
-    background: #020617;
-    border: 1px solid #334155;
-    border-radius: 16px;
-    box-shadow: 0 24px 60px rgba(2, 6, 23, 0.6);
-    z-index: 1;
-  }
-  .manual-tests-window-header {
-    display: flex;
-    justify-content: space-between;
-    gap: 1rem;
-    align-items: flex-start;
-    padding: 1rem 1.1rem;
-    border-bottom: 1px solid #1e293b;
-    background: #0b1220;
-  }
-  .manual-tests-window-header h2 {
-    font-size: 1rem;
-    color: #e2e8f0;
-    margin-bottom: 0.25rem;
-  }
-  .manual-tests-window-header p {
-    color: #94a3b8;
-    font-size: 0.84rem;
-  }
-  .manual-tests-close {
-    padding: 0.45rem 0.8rem;
-    border: 1px solid #475569;
-    border-radius: 8px;
-    background: transparent;
-    color: #cbd5e1;
-    font-size: 0.8rem;
-    cursor: pointer;
-  }
-  .manual-tests-close:hover {
-    border-color: #94a3b8;
-    color: #f8fafc;
-  }
-  .manual-tests-panel {
-    background: #111827;
-    padding: 1rem 1.1rem;
-    max-height: calc(88vh - 84px);
-    overflow-y: auto;
-  }
-  .test-groups {
-    display: grid;
-    grid-template-columns: 1fr;
-    gap: 0.85rem;
-  }
-  .test-group {
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    border-radius: 10px;
-    padding: 0.9rem;
-  }
-  .test-group-header {
-    display: flex;
-    gap: 0.6rem;
-    align-items: center;
-    margin-bottom: 0.45rem;
-    flex-wrap: wrap;
-  }
-  .test-group-header h3 {
-    font-size: 0.92rem;
-    color: #e2e8f0;
-  }
-  .test-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 48px;
-    padding: 0.2rem 0.45rem;
-    border-radius: 999px;
-    border: 1px solid #1d4ed8;
-    background: #0b3b84;
-    color: #dbeafe;
-    font-size: 0.72rem;
-    font-weight: 700;
-  }
-  .test-group-objective {
-    color: #94a3b8;
-    font-size: 0.82rem;
-    margin-bottom: 0.7rem;
-  }
-  .test-case-list {
-    display: grid;
-    gap: 0.6rem;
-  }
-  .test-case-card {
-    border: 1px solid #334155;
-    background: #111827;
-    border-radius: 8px;
-    padding: 0.75rem;
-  }
-  .test-case-prompt {
-    color: #e2e8f0;
-    font-size: 0.84rem;
-    margin-bottom: 0.5rem;
-    line-height: 1.45;
-  }
-  .test-case-actions {
-    margin-bottom: 0.45rem;
-  }
-  .test-prompt-btn {
-    padding: 0.35rem 0.7rem;
-    border: 1px solid #0ea5e9;
-    border-radius: 8px;
-    background: #082f49;
-    color: #e0f2fe;
-    font-size: 0.78rem;
-    cursor: pointer;
-  }
-  .test-prompt-btn:hover {
-    border-color: #38bdf8;
-    background: #0c4a6e;
-  }
-  .test-case-expected {
-    color: #94a3b8;
-    font-size: 0.79rem;
-    line-height: 1.4;
-  }
   /* Notifications panel */
   .notif-panel {
     position: fixed;
@@ -1194,6 +1107,120 @@ HTML_PAGE = """<!DOCTYPE html>
   }
   .correo-expandable summary:hover { color: #94a3b8; }
   .correo-expandable[open] summary { color: #94a3b8; }
+  /* ─── Tareas pendientes ─── */
+  .tareas-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .tareas-stats {
+    display: flex;
+    gap: 1.5rem;
+    font-size: 0.85rem;
+    color: #94a3b8;
+  }
+  .tareas-stats strong { color: #e2e8f0; }
+  .tareas-filter {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    color: #64748b;
+    cursor: pointer;
+  }
+  .tareas-filter input { cursor: pointer; }
+  .tareas-empty {
+    text-align: center;
+    color: #475569;
+    padding: 3rem 1rem;
+    font-size: 0.9rem;
+    line-height: 1.7;
+  }
+  .tab-badge.tareas-badge { background: #f59e0b; color: #1e1b18; }
+  .tarea-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    margin-bottom: 0.85rem;
+    animation: fadeIn 0.3s ease;
+    transition: opacity 0.3s, border-color 0.2s;
+  }
+  .tarea-card.completada {
+    opacity: 0.5;
+    border-color: #1e293b;
+  }
+  .tarea-card.urgente { border-left: 3px solid #ef4444; }
+  .tarea-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+  .tarea-descripcion {
+    font-size: 0.92rem;
+    color: #e2e8f0;
+    line-height: 1.45;
+    flex: 1;
+  }
+  .tarea-card.completada .tarea-descripcion { text-decoration: line-through; color: #64748b; }
+  .tarea-badges {
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+    margin-bottom: 0.5rem;
+  }
+  .tarea-meta {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    padding-top: 0.6rem;
+    border-top: 1px solid #334155;
+    font-size: 0.75rem;
+    color: #64748b;
+  }
+  .tarea-fecha-limite {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    color: #f59e0b;
+    font-weight: 600;
+  }
+  .tarea-fecha-limite.vencida { color: #ef4444; }
+  .tarea-origen {
+    max-width: 200px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .tarea-actions {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .tarea-btn {
+    padding: 0.3rem 0.6rem;
+    font-size: 0.72rem;
+    border-radius: 4px;
+    border: 1px solid #334155;
+    background: transparent;
+    color: #94a3b8;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .tarea-btn:hover { border-color: #475569; color: #e2e8f0; }
+  .tarea-btn.completar { border-color: #22c55e; color: #22c55e; }
+  .tarea-btn.completar:hover { background: #22c55e; color: #0f172a; }
+  .tarea-btn.reabrir { border-color: #f59e0b; color: #f59e0b; }
+  .tarea-btn.reabrir:hover { background: #f59e0b; color: #0f172a; }
+  .tarea-btn.eliminar { border-color: #64748b; }
+  .tarea-btn.eliminar:hover { border-color: #ef4444; color: #ef4444; }
 </style>
 </head>
 <body>
@@ -1227,6 +1254,9 @@ HTML_PAGE = """<!DOCTYPE html>
     <button class="tab-btn" id="tab-correos-btn" onclick="switchTab('correos')">
       Correos <span class="tab-badge" id="correos-badge" style="display:none">0</span>
     </button>
+    <button class="tab-btn" id="tab-tareas-btn" onclick="switchTab('tareas')">
+      Tareas <span class="tab-badge tareas-badge" id="tareas-badge" style="display:none">0</span>
+    </button>
   </nav>
 
   <!-- Panel: Asistente -->
@@ -1237,8 +1267,6 @@ HTML_PAGE = """<!DOCTYPE html>
       <span class="example-chip" onclick="useExample(this)">Busca documentos sobre vacaciones</span>
       <span class="example-chip" onclick="useExample(this)">Resume el documento politica_teletrabajo.md</span>
     </div>
-
-    __UI_TEST_CASES__
 
     <div class="input-area">
       <textarea id="peticion" placeholder="Escribe tu petición aquí..." rows="2"></textarea>
@@ -1260,6 +1288,22 @@ HTML_PAGE = """<!DOCTYPE html>
     </div>
     <div id="correos-list">
       <div class="correos-empty">No hay correos procesados aún.<br>Activa el monitor de Gmail para empezar a recibir.</div>
+    </div>
+  </div>
+
+  <!-- Panel: Tareas pendientes -->
+  <div class="tab-panel" id="panel-tareas">
+    <div class="tareas-header">
+      <div class="tareas-stats">
+        <span>Pendientes: <strong id="tareas-pendientes-count">0</strong></span>
+        <span>Completadas: <strong id="tareas-completadas-count">0</strong></span>
+      </div>
+      <label class="tareas-filter">
+        <input type="checkbox" id="tareas-show-completadas" onchange="fetchTareas()"> Mostrar completadas
+      </label>
+    </div>
+    <div id="tareas-list">
+      <div class="tareas-empty">No hay tareas pendientes.<br>Las tareas se extraen automáticamente de los correos procesados.</div>
     </div>
   </div>
 </div>
@@ -1340,31 +1384,8 @@ function useExample(el) {
 
 function usePrompt(prompt) {
   input.value = prompt;
-  closeManualTests();
   input.focus();
 }
-
-function openManualTests() {
-  const modal = document.getElementById('manual-tests-modal');
-  if (!modal) return;
-  modal.classList.add('open');
-  modal.setAttribute('aria-hidden', 'false');
-  document.body.style.overflow = 'hidden';
-}
-
-function closeManualTests() {
-  const modal = document.getElementById('manual-tests-modal');
-  if (!modal) return;
-  modal.classList.remove('open');
-  modal.setAttribute('aria-hidden', 'true');
-  document.body.style.overflow = '';
-}
-
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    closeManualTests();
-  }
-});
 
 async function enviar() {
   const peticion = input.value.trim();
@@ -1614,19 +1635,140 @@ async function marcarCorreosLeidos() {
 }
 
 function switchTab(tab) {
-  ['asistente', 'correos'].forEach(t => {
+  ['asistente', 'correos', 'tareas'].forEach(t => {
     document.getElementById(`panel-${t}`).classList.toggle('active', t === tab);
     document.getElementById(`tab-${t}-btn`).classList.toggle('active', t === tab);
   });
   if (tab === 'correos') marcarCorreosLeidos();
+  if (tab === 'tareas') fetchTareas();
+}
+
+// ── Tareas pendientes ──
+let lastTareasCount = -1;
+
+async function fetchTareas() {
+  try {
+    const r = await fetch('/api/tareas');
+    const d = await r.json();
+    const tareas = d.tareas || [];
+    const pendientes = d.pendientes || 0;
+    const completadas = d.completadas || 0;
+
+    // Badge en la pestaña
+    const badge = document.getElementById('tareas-badge');
+    if (pendientes > 0) {
+      badge.textContent = pendientes;
+      badge.style.display = 'inline-flex';
+    } else {
+      badge.style.display = 'none';
+    }
+
+    // Stats
+    document.getElementById('tareas-pendientes-count').textContent = pendientes;
+    document.getElementById('tareas-completadas-count').textContent = completadas;
+
+    // Filtrar según checkbox
+    const showCompletadas = document.getElementById('tareas-show-completadas').checked;
+    const filtradas = showCompletadas ? tareas : tareas.filter(t => !t.completada);
+
+    renderTareas(filtradas);
+    lastTareasCount = tareas.length;
+  } catch(e) { console.error('Error fetching tareas:', e); }
+}
+
+function renderTareas(tareas) {
+  const list = document.getElementById('tareas-list');
+  if (!tareas.length) {
+    const showCompletadas = document.getElementById('tareas-show-completadas').checked;
+    list.innerHTML = showCompletadas 
+      ? '<div class="tareas-empty">No hay tareas.</div>'
+      : '<div class="tareas-empty">No hay tareas pendientes.<br>Las tareas se extraen automáticamente de los correos procesados.</div>';
+    return;
+  }
+  list.innerHTML = tareas.map(t => renderTareaCard(t)).join('');
+}
+
+function renderTareaCard(t) {
+  const urgClass = t.urgencia === 'urgente' ? 'urgente' : '';
+  const completadaClass = t.completada ? 'completada' : '';
+  
+  // Determinar si la fecha límite está vencida
+  let fechaHtml = '';
+  if (t.fecha_limite) {
+    const hoy = new Date();
+    hoy.setHours(0,0,0,0);
+    // Intentar parsear fecha en varios formatos
+    let fechaLimite = null;
+    const fechaStr = t.fecha_limite.toLowerCase();
+    if (fechaStr.includes('/')) {
+      const parts = fechaStr.split('/');
+      if (parts.length >= 2) {
+        fechaLimite = new Date(parts[2] || hoy.getFullYear(), parseInt(parts[1])-1, parseInt(parts[0]));
+      }
+    }
+    const vencida = fechaLimite && fechaLimite < hoy && !t.completada;
+    fechaHtml = `<span class="tarea-fecha-limite${vencida ? ' vencida' : ''}">\u23f0 ${escapeHtml(t.fecha_limite)}${vencida ? ' (vencida)' : ''}</span>`;
+  }
+
+  const btnAccion = t.completada
+    ? `<button class="tarea-btn reabrir" onclick="reabrirTarea(${t.id})">Reabrir</button>`
+    : `<button class="tarea-btn completar" onclick="completarTarea(${t.id})">✓ Completar</button>`;
+
+  return `
+    <div class="tarea-card ${urgClass} ${completadaClass}">
+      <div class="tarea-card-header">
+        <div class="tarea-descripcion">${escapeHtml(t.descripcion)}</div>
+      </div>
+      <div class="tarea-badges">
+        <span class="badge ${t.urgencia === 'urgente' ? 'urg-urgente' : 'urg-no-urgente'}">${escapeHtml(t.urgencia)}</span>
+        ${t.prioridad ? `<span class="badge" style="background:#1e1b18;color:#a8a29e">${escapeHtml(t.prioridad)}</span>` : ''}
+      </div>
+      <div class="tarea-meta">
+        <div>
+          ${fechaHtml}
+          ${t.email_origen ? `<span class="tarea-origen" title="${escapeHtml(t.email_origen)}">&#x1F4E7; ${escapeHtml(t.email_origen)}</span>` : ''}
+        </div>
+        <div class="tarea-actions">
+          ${btnAccion}
+          <button class="tarea-btn eliminar" onclick="eliminarTarea(${t.id})">\u2715</button>
+        </div>
+      </div>
+      ${t.completada && t.fecha_completada ? `<div style="font-size:0.7rem;color:#475569;margin-top:0.4rem">Completada: ${escapeHtml(t.fecha_completada)}</div>` : ''}
+    </div>`;
+}
+
+async function completarTarea(id) {
+  try {
+    await fetch(`/api/tareas/${id}/completar`, { method: 'POST' });
+    fetchTareas();
+  } catch(e) { console.error('Error completando tarea:', e); }
+}
+
+async function reabrirTarea(id) {
+  try {
+    await fetch(`/api/tareas/${id}/reabrir`, { method: 'POST' });
+    fetchTareas();
+  } catch(e) { console.error('Error reabriendo tarea:', e); }
+}
+
+async function eliminarTarea(id) {
+  if (!confirm('¿Eliminar esta tarea?')) return;
+  try {
+    await fetch(`/api/tareas/${id}`, { method: 'DELETE' });
+    fetchTareas();
+  } catch(e) { console.error('Error eliminando tarea:', e); }
 }
 
 // Poll correos cada 10s
 fetchCorreos();
 setInterval(fetchCorreos, 10000);
+
+// Poll tareas cada 15s
+fetchTareas();
+setInterval(fetchTareas, 15000);
 </script>
 </body>
-</html>""".replace("__UI_TEST_CASES__", _build_ui_test_cases_html())
+</html>"""
 
 
 @app.get("/", response_class=HTMLResponse)

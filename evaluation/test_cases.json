@@ -1,0 +1,247 @@
+[
+  {
+    "id": "TC-RF1-01",
+    "bloque": "RF1_urgencia",
+    "descripcion": "Email urgente con lenguaje explícito de emergencia",
+    "input": {
+      "asunto": "URGENTE: Servidor caído en producción",
+      "remitente": "ops@empresa.com",
+      "cuerpo": "El servidor principal está caído desde hace 30 minutos. Es bloqueante para todos los equipos. Necesito que lo reviséis ASAP."
+    },
+    "esperado": {
+      "urgencia": "urgente"
+    }
+  },
+  {
+    "id": "TC-RF1-02",
+    "bloque": "RF1_urgencia",
+    "descripcion": "Email informativo sin urgencia",
+    "input": {
+      "asunto": "Resumen semanal del equipo",
+      "remitente": "manager@empresa.com",
+      "cuerpo": "Os mando el resumen de actividad de esta semana. Todo va bien. El próximo lunes tenemos la reunión habitual."
+    },
+    "esperado": {
+      "urgencia": "no urgente"
+    }
+  },
+  {
+    "id": "TC-RF1-03",
+    "bloque": "RF1_urgencia",
+    "descripcion": "Email trivial de cortesía",
+    "input": {
+      "asunto": "Gracias",
+      "remitente": "cliente@externo.com",
+      "cuerpo": "Muchas gracias por vuestra atención. Un saludo."
+    },
+    "esperado": {
+      "urgencia": "trivial"
+    }
+  },
+  {
+    "id": "TC-RF1-04",
+    "bloque": "RF1_urgencia",
+    "descripcion": "Email con cita programada para mañana — NO debe ser urgente",
+    "input": {
+      "asunto": "Organizar cita equipo DevOps",
+      "remitente": "jefe@empresa.com",
+      "cuerpo": "Buenas, organiza una cita con el equipo de DevOps mañana a las 18:00."
+    },
+    "esperado": {
+      "urgencia": "no urgente"
+    }
+  },
+
+  {
+    "id": "TC-RF3-01",
+    "bloque": "RF3_tareas",
+    "descripcion": "Email con tarea concreta y fecha límite",
+    "input": {
+      "asunto": "Entrega del informe trimestral",
+      "remitente": "direccion@empresa.com",
+      "cuerpo": "Necesito que me envíes el informe de resultados del Q2 antes del viernes 4 de julio."
+    },
+    "esperado": {
+      "num_acciones": 1,
+      "accion_contiene": "informe",
+      "tiene_fecha_limite": true
+    }
+  },
+  {
+    "id": "TC-RF3-02",
+    "bloque": "RF3_tareas",
+    "descripcion": "Email con varias tareas",
+    "input": {
+      "asunto": "Preparativos para la auditoría",
+      "remitente": "compliance@empresa.com",
+      "cuerpo": "De cara a la auditoría del mes que viene necesito que: 1) Prepares la documentación de procesos, 2) Revises los accesos de usuarios y 3) Confirmes la fecha con el auditor externo."
+    },
+    "esperado": {
+      "num_acciones_min": 2
+    }
+  },
+  {
+    "id": "TC-RF3-03",
+    "bloque": "RF3_tareas",
+    "descripcion": "Email de cita — NO debe generar tarea en el panel (es calendario)",
+    "input": {
+      "asunto": "Organizar cita equipo DevOps",
+      "remitente": "jefe@empresa.com",
+      "cuerpo": "Buenas, organiza una cita con el equipo de DevOps mañana a las 18:00."
+    },
+    "esperado": {
+      "num_acciones": 0
+    }
+  },
+
+  {
+    "id": "TC-CLAS-01",
+    "bloque": "clasificacion_peticion",
+    "descripcion": "Petición de agenda pura",
+    "input": {
+      "peticion": "Programa una reunión con el equipo de marketing el miércoles a las 10:00"
+    },
+    "esperado": {
+      "categoria": "agenda"
+    }
+  },
+  {
+    "id": "TC-CLAS-02",
+    "bloque": "clasificacion_peticion",
+    "descripcion": "Petición de redacción de correo",
+    "input": {
+      "peticion": "Redacta un email a Recursos Humanos solicitando los días de vacaciones pendientes"
+    },
+    "esperado": {
+      "categoria": "comunicacion"
+    }
+  },
+  {
+    "id": "TC-CLAS-03",
+    "bloque": "clasificacion_peticion",
+    "descripcion": "Petición de consulta documental",
+    "input": {
+      "peticion": "¿Cuántos días de teletrabajo permite la política de la empresa?"
+    },
+    "esperado": {
+      "categoria": "documentos"
+    }
+  },
+  {
+    "id": "TC-CLAS-04",
+    "bloque": "clasificacion_peticion",
+    "descripcion": "Petición combinada agenda + correo",
+    "input": {
+      "peticion": "Agenda una reunión con el cliente el jueves a las 16:00 y envíale un correo de confirmación"
+    },
+    "esperado": {
+      "categoria": "ambos"
+    }
+  },
+  {
+    "id": "TC-CLAS-05",
+    "bloque": "clasificacion_peticion",
+    "descripcion": "Consulta de tareas pendientes — NO debe ir a documentos",
+    "input": {
+      "peticion": "¿Qué tareas tengo pendientes?"
+    },
+    "esperado": {
+      "categoria": "tareas"
+    }
+  },
+  {
+    "id": "TC-CLAS-06",
+    "bloque": "clasificacion_peticion",
+    "descripcion": "Pregunta sobre política de vacaciones",
+    "input": {
+      "peticion": "¿Puedo coger vacaciones durante el periodo de cierre fiscal?"
+    },
+    "esperado": {
+      "categoria": "documentos"
+    }
+  },
+
+  {
+    "id": "TC-RF6-01",
+    "bloque": "RF6_busqueda_documento",
+    "descripcion": "Búsqueda por tema: teletrabajo",
+    "input": {
+      "peticion": "Busca el documento sobre teletrabajo"
+    },
+    "esperado": {
+      "documento_contiene": "teletrabajo"
+    }
+  },
+  {
+    "id": "TC-RF6-02",
+    "bloque": "RF6_busqueda_documento",
+    "descripcion": "Búsqueda por empresa: BRXS",
+    "input": {
+      "peticion": "¿Qué documentos tenemos sobre BRXS?"
+    },
+    "esperado": {
+      "documento_contiene": "BRXS"
+    }
+  },
+
+  {
+    "id": "TC-RF7-01",
+    "bloque": "RF7_resumen_documento",
+    "descripcion": "Resumen de política de vacaciones",
+    "input": {
+      "peticion": "Resume la política de vacaciones de la empresa"
+    },
+    "esperado": {
+      "resultado_contiene_alguno": ["vacacion", "días", "periodo", "disfrute"],
+      "longitud_min_palabras": 50
+    }
+  },
+  {
+    "id": "TC-RF7-02",
+    "bloque": "RF7_resumen_documento",
+    "descripcion": "Resumen de política de teletrabajo",
+    "input": {
+      "peticion": "¿En qué consiste la política de teletrabajo?"
+    },
+    "esperado": {
+      "resultado_contiene_alguno": ["teletrabajo", "remoto", "días", "jornada"],
+      "longitud_min_palabras": 50
+    }
+  },
+
+  {
+    "id": "TC-RF8-01",
+    "bloque": "RF8_qa_documento",
+    "descripcion": "Pregunta concreta sobre política de teletrabajo",
+    "input": {
+      "peticion": "¿Cuántos días de teletrabajo se permiten a la semana según la política?"
+    },
+    "esperado": {
+      "resultado_contiene_alguno": ["día", "días", "semana", "jornada"],
+      "cita_fragmento": true
+    }
+  },
+  {
+    "id": "TC-RF8-02",
+    "bloque": "RF8_qa_documento",
+    "descripcion": "Pregunta concreta sobre vacaciones en periodo bloqueado",
+    "input": {
+      "peticion": "¿Se pueden coger vacaciones en agosto según la política?"
+    },
+    "esperado": {
+      "resultado_contiene_alguno": ["agosto", "periodo", "bloqueado", "verano"],
+      "cita_fragmento": true
+    }
+  },
+  {
+    "id": "TC-RF8-03",
+    "bloque": "RF8_qa_documento",
+    "descripcion": "Pregunta sobre información que NO está en los documentos",
+    "input": {
+      "peticion": "¿Cuál es el salario mínimo según la política interna?"
+    },
+    "esperado": {
+      "resultado_contiene_alguno": ["no se menciona", "no aparece", "no encontr", "no se indica", "no consta"]
+    }
+  }
+]

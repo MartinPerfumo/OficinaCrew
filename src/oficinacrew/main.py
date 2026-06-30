@@ -9,15 +9,11 @@ import warnings
 
 from pathlib import Path
 
-from pydantic import BaseModel
-
 os.environ.setdefault("CREWAI_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("OTEL_SDK_DISABLED", "true")
 
 from crewai import LLM
 from crewai.flow import Flow, listen, start, router
-
-#from oficinacrew.crews.content_crew.content_crew import ContentCrew
 
 warnings.filterwarnings("ignore", category=SyntaxWarning, module="pysbd") # Ignorar advertencias de sintaxis de pysbd
 
@@ -514,9 +510,11 @@ Responde SOLO con el JSON, sin texto adicional."""
         ) or has_policy_question_intent
         asks_to_write = bool(
             re.search(
-                r"\b(redacta|redactar|escribe|escribir|prepara|preparar|redacción|redaccion|enviar|envia|envía|mandar|manda|remitir|remite)\b"
-                r".*\b(email|correo|mensaje|comunicado|respuesta)\b|"
-                r"\b(email|correo|mensaje|comunicado)\b.*\b(redacta|redactar|escribe|escribir|prepara|preparar|enviar|envia|envía|mandar|manda|remitir|remite)\b",
+                r"\b(redacta|redactar|escribe|escribir|prepara|preparar|redacción|redaccion|"
+                r"enviar|envia|envía|env[ií]ale|env[ií]aselo|mandar|manda|mándale|remitir|remite)\b"
+                r".*\b(email|correo|mensaje|comunicado|respuesta|confirmaci[oó]n)\b|"
+                r"\b(email|correo|mensaje|comunicado)\b.*\b(redacta|redactar|escribe|escribir|prepara|preparar|"
+                r"enviar|envia|envía|mandar|manda|remitir|remite)\b",
                 text_for_rules,
             )
         )

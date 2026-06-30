@@ -1,0 +1,336 @@
+{
+  "timestamp": "2026-06-30T20:00:31.624205",
+  "total": 20,
+  "pass": 11,
+  "fail": 9,
+  "accuracy_pct": 55,
+  "por_bloque": {
+    "RF1_urgencia": {
+      "pass": 4,
+      "total": 4,
+      "accuracy_pct": 100,
+      "tiempo_medio_s": 2.6
+    },
+    "RF3_tareas": {
+      "pass": 3,
+      "total": 3,
+      "accuracy_pct": 100,
+      "tiempo_medio_s": 1.48
+    },
+    "clasificacion_peticion": {
+      "pass": 3,
+      "total": 6,
+      "accuracy_pct": 50,
+      "tiempo_medio_s": 1.26
+    },
+    "RF6_busqueda_documento": {
+      "pass": 0,
+      "total": 2,
+      "accuracy_pct": 0,
+      "tiempo_medio_s": 0.0
+    },
+    "RF7_resumen_documento": {
+      "pass": 1,
+      "total": 2,
+      "accuracy_pct": 50,
+      "tiempo_medio_s": 0.48
+    },
+    "RF8_qa_documento": {
+      "pass": 0,
+      "total": 3,
+      "accuracy_pct": 0,
+      "tiempo_medio_s": 0.0
+    }
+  },
+  "casos": [
+    {
+      "id": "TC-RF1-01",
+      "bloque": "RF1_urgencia",
+      "descripcion": "Email urgente con lenguaje explícito de emergencia",
+      "passed": true,
+      "elapsed_s": 6.8,
+      "obtenido": {
+        "urgencia": "urgente"
+      },
+      "esperado": {
+        "urgencia": "urgente"
+      },
+      "detalle": "El servidor principal está caído y es bloqueante para todos los equipos. Se necesita revisión ASAP."
+    },
+    {
+      "id": "TC-RF1-02",
+      "bloque": "RF1_urgencia",
+      "descripcion": "Email informativo sin urgencia",
+      "passed": true,
+      "elapsed_s": 1.21,
+      "obtenido": {
+        "urgencia": "no urgente"
+      },
+      "esperado": {
+        "urgencia": "no urgente"
+      },
+      "detalle": "El email es un resumen semanal y no expresa inmediatez extrema, solo menciona una reunión para el próximo lunes."
+    },
+    {
+      "id": "TC-RF1-03",
+      "bloque": "RF1_urgencia",
+      "descripcion": "Email trivial de cortesía",
+      "passed": true,
+      "elapsed_s": 0.86,
+      "obtenido": {
+        "urgencia": "trivial"
+      },
+      "esperado": {
+        "urgencia": "trivial"
+      },
+      "detalle": "El email es un mensaje de agradecimiento sin contenido que requiera atención inmediata."
+    },
+    {
+      "id": "TC-RF1-04",
+      "bloque": "RF1_urgencia",
+      "descripcion": "Email con cita programada para mañana — NO debe ser urgente",
+      "passed": true,
+      "elapsed_s": 1.52,
+      "obtenido": {
+        "urgencia": "no urgente"
+      },
+      "esperado": {
+        "urgencia": "no urgente"
+      },
+      "detalle": "Se solicita una cita para mañana, pero no hay indicación de inmediatez extrema."
+    },
+    {
+      "id": "TC-RF3-01",
+      "bloque": "RF3_tareas",
+      "descripcion": "Email con tarea concreta y fecha límite",
+      "passed": true,
+      "elapsed_s": 1.52,
+      "obtenido": {
+        "num_acciones": 1,
+        "acciones": [
+          "enviar el informe de resultados del Q2"
+        ]
+      },
+      "esperado": {
+        "num_acciones": 1,
+        "accion_contiene": "informe",
+        "tiene_fecha_limite": true
+      },
+      "checks": [
+        {
+          "campo": "num_acciones",
+          "ok": true,
+          "detalle": "obtenido=1, esperado=1"
+        },
+        {
+          "campo": "accion_contiene",
+          "ok": true,
+          "detalle": "buscado='informe'"
+        },
+        {
+          "campo": "tiene_fecha_limite",
+          "ok": true,
+          "detalle": "alguna acción debe tener fecha"
+        }
+      ]
+    },
+    {
+      "id": "TC-RF3-02",
+      "bloque": "RF3_tareas",
+      "descripcion": "Email con varias tareas",
+      "passed": true,
+      "elapsed_s": 0.96,
+      "obtenido": {
+        "num_acciones": 3,
+        "acciones": [
+          "Preparar la documentación de procesos",
+          "Revisar los accesos de usuarios",
+          "Confirmar la fecha con el auditor externo"
+        ]
+      },
+      "esperado": {
+        "num_acciones_min": 2
+      },
+      "checks": [
+        {
+          "campo": "num_acciones_min",
+          "ok": true,
+          "detalle": "obtenido=3, mínimo=2"
+        }
+      ]
+    },
+    {
+      "id": "TC-RF3-03",
+      "bloque": "RF3_tareas",
+      "descripcion": "Email de cita — NO debe generar tarea en el panel (es calendario)",
+      "passed": true,
+      "elapsed_s": 1.96,
+      "obtenido": {
+        "num_acciones": 0,
+        "acciones": []
+      },
+      "esperado": {
+        "num_acciones": 0
+      },
+      "checks": [
+        {
+          "campo": "num_acciones",
+          "ok": true,
+          "detalle": "obtenido=0, esperado=0"
+        }
+      ]
+    },
+    {
+      "id": "TC-CLAS-01",
+      "bloque": "clasificacion_peticion",
+      "descripcion": "Petición de agenda pura",
+      "passed": true,
+      "elapsed_s": 2.81,
+      "obtenido": {
+        "categoria": "agenda"
+      },
+      "esperado": {
+        "categoria": "agenda"
+      }
+    },
+    {
+      "id": "TC-CLAS-02",
+      "bloque": "clasificacion_peticion",
+      "descripcion": "Petición de redacción de correo",
+      "passed": false,
+      "elapsed_s": 0.0,
+      "obtenido": {
+        "categoria": "tareas"
+      },
+      "esperado": {
+        "categoria": "comunicacion"
+      }
+    },
+    {
+      "id": "TC-CLAS-03",
+      "bloque": "clasificacion_peticion",
+      "descripcion": "Petición de consulta documental",
+      "passed": true,
+      "elapsed_s": 3.47,
+      "obtenido": {
+        "categoria": "documentos"
+      },
+      "esperado": {
+        "categoria": "documentos"
+      }
+    },
+    {
+      "id": "TC-CLAS-04",
+      "bloque": "clasificacion_peticion",
+      "descripcion": "Petición combinada agenda + correo",
+      "passed": false,
+      "elapsed_s": 1.31,
+      "obtenido": {
+        "categoria": "agenda"
+      },
+      "esperado": {
+        "categoria": "ambos"
+      }
+    },
+    {
+      "id": "TC-CLAS-05",
+      "bloque": "clasificacion_peticion",
+      "descripcion": "Consulta de tareas pendientes — NO debe ir a documentos",
+      "passed": true,
+      "elapsed_s": 0.0,
+      "obtenido": {
+        "categoria": "tareas"
+      },
+      "esperado": {
+        "categoria": "tareas"
+      }
+    },
+    {
+      "id": "TC-CLAS-06",
+      "bloque": "clasificacion_peticion",
+      "descripcion": "Pregunta sobre política de vacaciones",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 5109, Requested 2309. Please try again in 14.18s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    },
+    {
+      "id": "TC-RF6-01",
+      "bloque": "RF6_busqueda_documento",
+      "descripcion": "Búsqueda por tema: teletrabajo",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4784, Requested 2321. Please try again in 11.05s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    },
+    {
+      "id": "TC-RF6-02",
+      "bloque": "RF6_busqueda_documento",
+      "descripcion": "Búsqueda por empresa: BRXS",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4678, Requested 2321. Please try again in 9.99s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    },
+    {
+      "id": "TC-RF7-01",
+      "bloque": "RF7_resumen_documento",
+      "descripcion": "Resumen de política de vacaciones",
+      "passed": true,
+      "elapsed_s": 0.96,
+      "obtenido": {
+        "extracto": "## politica_vacaciones.md\nResumen ejecutivo:\nCada empleado tiene derecho a 23 días laborables de vacaciones al año. Los días no disfrutados no son acumulables al siguiente año natural, salvo autorización expresa de RRHH. Las vacaciones deben solicitarse con un mínimo de 15 días de antelación a travé"
+      },
+      "esperado": {
+        "resultado_contiene_alguno": [
+          "vacacion",
+          "días",
+          "periodo",
+          "disfrute"
+        ],
+        "longitud_min_palabras": 50
+      },
+      "checks": [
+        {
+          "campo": "resultado_contiene_alguno",
+          "ok": true,
+          "detalle": "['vacacion', 'días', 'periodo', 'disfrute']"
+        },
+        {
+          "campo": "longitud_min_palabras",
+          "ok": true,
+          "detalle": "obtenido=260"
+        }
+      ]
+    },
+    {
+      "id": "TC-RF7-02",
+      "bloque": "RF7_resumen_documento",
+      "descripcion": "Resumen de política de teletrabajo",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4433, Requested 2323. Please try again in 7.56s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    },
+    {
+      "id": "TC-RF8-01",
+      "bloque": "RF8_qa_documento",
+      "descripcion": "Pregunta concreta sobre política de teletrabajo",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4234, Requested 2320. Please try again in 5.54s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    },
+    {
+      "id": "TC-RF8-02",
+      "bloque": "RF8_qa_documento",
+      "descripcion": "Pregunta concreta sobre vacaciones en periodo bloqueado",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 4110, Requested 2321. Please try again in 4.31s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    },
+    {
+      "id": "TC-RF8-03",
+      "bloque": "RF8_qa_documento",
+      "descripcion": "Pregunta sobre información que NO está en los documentos",
+      "passed": false,
+      "elapsed_s": 0,
+      "error": "litellm.RateLimitError: RateLimitError: GroqException - {\"error\":{\"message\":\"Rate limit reached for model `llama-3.1-8b-instant` in organization `org_01kmk7g4zwfmctfkzr2jv939x6` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Used 3815, Requested 2322. Please try again in 1.37s. Need more tokens? Upgrade to Dev Tier today at https://console.groq.com/settings/billing\",\"type\":\"tokens\",\"code\":\"rate_limit_exceeded\"}}\n"
+    }
+  ]
+}

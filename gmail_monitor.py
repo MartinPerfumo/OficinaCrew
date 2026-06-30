@@ -94,7 +94,11 @@ def analyze_email_urgency_and_actions(email: dict) -> dict:
         sys.path.insert(0, str(Path(__file__).parent / "src"))
         from src.oficinacrew.main import _call_llm_with_fallback
 
+        from datetime import date
+        today_str = date.today().strftime("%d/%m/%Y")
         prompt = f"""Analiza este email y responde SOLO con JSON válido.
+
+Hoy es {today_str}.
 
 Email:
 De: {email.get('sender', '')}
@@ -110,7 +114,7 @@ Devuelve este formato exacto:
     {{
       "accion": "tarea concreta",
       "responsable": "persona o equipo si aparece, o vacío",
-      "fecha_limite": "fecha/hora si aparece, o vacío",
+      "fecha_limite": "DD/MM/YYYY HH:MM si hay fecha, o vacío",
       "prioridad": "alta|media|baja"
     }}
   ]
@@ -120,6 +124,11 @@ Reglas:
 - No inventes datos que no estén en el email.
 - Si no hay acciones, devuelve una lista vacía.
 - La urgencia debe ser solo una de: urgente, no urgente, trivial.
+- Usa "urgente" SOLO si el contenido expresa inmediatez extrema con palabras como "urgente", "ASAP", "hoy mismo", "bloqueante", "crítico", "emergencia". Una cita, reunión o solicitud rutinaria —aunque sea para mañana— es "no urgente".
+- fecha_limite SIEMPRE debe ser una fecha absoluta en formato DD/MM/YYYY HH:MM, nunca texto relativo como "la semana que viene".
+- Si el email menciona un día relativo (mañana, el viernes, la semana que viene...), calcúlalo desde hoy ({today_str}) y escribe la fecha absoluta.
+- Si no se menciona hora, usa 17:30 como hora por defecto.
+- Si no hay ninguna fecha límite en el email, deja el campo vacío.
 """
         text = _call_llm_with_fallback(prompt)
         start_idx = text.find("{")
@@ -1119,6 +1128,34 @@ def has_explicit_scheduling_intent(text: str) -> bool:
     )
     return (has_schedule_verbs or has_option_selection) and not has_document_context
 
+
+def has_task_query_intent(text: str) -> bool:
+    """Devuelve True si la petición es una consulta sobre tareas/acciones pendientes."""
+    normalized = (text or "").lower()
+    # Patrones directos e inequívocos de consulta de tareas
+    direct_match = bool(
+        re.search(
+            r"\b(mis\s+tareas|lista\s+de\s+tareas|tareas\s+pendientes|acciones\s+pendientes|"
+            r"qu[eé]\s+tengo\s+(que\s+hacer|pendiente)|qu[eé]\s+me\s+queda\s+(por\s+hacer|pendiente)|"
+            r"qu[eé]\s+debo\s+hacer|tengo\s+algo\s+pendiente|hay\s+algo\s+pendiente|"
+            r"recordatorios?\s+pendientes?|to.?do\s+list)\b",
+            normalized,
+        )
+    )
+    # 'pendiente/s' solo como sustantivo principal precedido de determinante/verbo
+    pendiente_sustantivo = bool(
+        re.search(r"\b(mis|los|las|hay|tengo|ver|mostrar|listar)\s+(tareas?\s+)?pendientes?\b", normalized)
+    )
+    # Excluir si el contexto trata de redactar, documentos o normativa
+    exclude = bool(
+        re.search(
+            r"\b(documento|documentos|informe|pol[ií]tic|normativ|redact|escrib|email|correo|vacacion|teletrabaj)\b",
+            normalized,
+        )
+    )
+    return (direct_match or pendiente_sustantivo) and not exclude
+
+
 def find_overlapping_events(calendar_service, start_dt: datetime, end_dt: datetime) -> list[dict]:
     """Busca eventos que se solapan con la franja solicitada en el calendario principal."""
     try:
@@ -1469,7 +1506,17 @@ def create_calendar_event_from_text(calendar_service, event_text: str, email: di
             "suggested_options": suggested_options,
         }
 
-    summary = email.get("subject", "Reunión")[:120]
+    raw_subject = email.get("subject", "Reunión")
+    summary = re.sub(
+        r'^(?:organizar?|agenda[rn]?|programar?|crear?\s+(?:una?\s+)?(?:cita|reuni[oó]n|evento)|fijar?|concertar?|coordinar?|convocar?|reservar?)\s+(?:una?\s+)?',
+        '',
+        raw_subject.strip(),
+        flags=re.IGNORECASE,
+    ).strip()
+    if not summary:
+        summary = raw_subject
+    summary = summary[:1].upper() + summary[1:]
+    summary = summary[:120]
     # Enviamos dateTime con offset local explícito para evitar desplazamientos a UTC.
     event_body = {
         "summary": summary,
